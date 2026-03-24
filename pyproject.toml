@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lumoauth"
+version = "0.1.0"
+description = "Python SDK for LumoAuth Agent authentication and capability management"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+keywords = ["lumoauth", "agent", "authentication", "oauth2", "ai-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "requests>=2.25.0",
+]
+
+[project.optional-dependencies]
+aauth = [
+    "cryptography>=41.0",
+]
+
+[project.urls]
+Documentation = "https://docs.lumoauth.dev/agents/registry"
+Repository = "https://github.com/lumoauth/lumoauth-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lumoauth"]
