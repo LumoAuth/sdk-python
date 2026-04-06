@@ -361,6 +361,71 @@ class LumoAuthAgent:
         )
 
     # =========================================================================
+    # Agent registration
+    # =========================================================================
+
+    def register(
+        self,
+        name: str,
+        description: str | None = None,
+        capabilities: list[str] | None = None,
+        jwks_uri: str | None = None,
+    ) -> dict[str, Any]:
+        """Register this agent with LumoAuth.
+
+        Creates or updates the agent record in the tenant directory.
+        The ``client_id`` / ``client_secret`` on this instance are used
+        for identification.
+
+        Args:
+            name: Human-readable agent name (e.g. ``"Document Analyser"``).
+            description: Optional description of the agent's purpose.
+            capabilities: List of capability slugs the agent declares
+                (e.g. ``["read:documents", "tool:search_web"]``).
+            jwks_uri: Optional HTTPS URL to the agent's public JWKS
+                (required for AAuth / proof-of-possession flows).
+
+        Returns:
+            Registration response dict (includes ``agent_id``).
+
+        Raises:
+            RuntimeError: If registration fails.
+        """
+        self.ensure_authenticated()
+
+        body: dict[str, Any] = {
+            "client_id": self.client_id,
+            "name": name,
+        }
+        if description:
+            body["description"] = description
+        if capabilities:
+            body["capabilities"] = capabilities
+        if jwks_uri:
+            body["jwks_uri"] = jwks_uri
+
+        resp = requests.post(
+            f"{self.base_url}/t/{self.tenant}/api/v1/agents/register",
+            headers=self._auth_headers(),
+            json=body,
+            timeout=30,
+            verify=self._verify_tls,
+        )
+
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Agent registration failed: HTTP {resp.status_code} — {resp.text}"
+            )
+
+        data = resp.json()
+        logger.info(
+            "Agent registered: name=%s agent_id=%s",
+            name,
+            data.get("agent_id"),
+        )
+        return data
+
+    # =========================================================================
     # MCP token exchange (RFC 8693)
     # =========================================================================
 

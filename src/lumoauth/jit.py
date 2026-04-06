@@ -376,6 +376,76 @@ class JITContext:
             verify=self._verify_tls,
         )
 
+    # =========================================================================
+    # Admin / oversight helpers
+    # =========================================================================
+
+    def list_pending_requests(self) -> list[dict[str, Any]]:
+        """List all pending HITL approval requests for the current task.
+
+        Returns:
+            List of pending request dicts, each with ``request_id``,
+            ``status``, ``risk_level``, ``authorization_details``, etc.
+
+        Raises:
+            RuntimeError: If the request fails.
+        """
+        resp = requests.get(
+            self._api("/jit/pending"),
+            headers=self._headers(),
+            timeout=30,
+            verify=self._verify_tls,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Listed %d pending JIT requests", len(data.get("requests", [])))
+        return data.get("requests", data if isinstance(data, list) else [])
+
+    def evaluate_task(
+        self,
+        task_id: str | None = None,
+        *,
+        result: str = "completed",
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate and close a task with an outcome.
+
+        Allows supervisors or orchestrators to mark a task as
+        ``"completed"``, ``"failed"``, or ``"cancelled"`` and attach audit
+        notes.  Uses the current task if *task_id* is omitted.
+
+        Args:
+            task_id: Task to evaluate.  Defaults to ``self.task_id``.
+            result: Outcome label — ``"completed"``, ``"failed"``, or
+                ``"cancelled"``.
+            notes: Human-readable notes attached to the audit record.
+
+        Returns:
+            Server response dict.
+
+        Raises:
+            RuntimeError: If no task is active or the request fails.
+        """
+        tid = task_id or self.task_id
+        if not tid:
+            raise RuntimeError("No active task — call create_task() first.")
+
+        body: dict[str, Any] = {"result": result}
+        if notes:
+            body["notes"] = notes
+
+        resp = requests.post(
+            self._api(f"/jit/task/{tid}/evaluate"),
+            headers=self._headers(),
+            json=body,
+            timeout=30,
+            verify=self._verify_tls,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info("Task %s evaluated as '%s'", tid, result)
+        return data
+
     def call_with_escalation(
         self,
         method: str,
