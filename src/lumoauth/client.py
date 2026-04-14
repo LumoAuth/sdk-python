@@ -65,7 +65,7 @@ class LumoAuthAgent:
         self.base_url: str = (
             base_url or os.environ.get("LUMOAUTH_URL", "https://app.lumoauth.dev")
         )
-        self.tenant: str = (
+        self.org_id: str = (
             org_id or os.environ.get("LUMOAUTH_ORG_ID", "")
         )
         self.client_id: str = client_id or os.environ.get("AGENT_CLIENT_ID", "")
@@ -122,7 +122,7 @@ class LumoAuthAgent:
         logger.info(
             "Authenticating agent (base_url=%s, org_id=%s, client_id=%s…)",
             self.base_url,
-            self.tenant,
+            self.org_id,
             self.client_id[:12],
         )
 
@@ -135,7 +135,7 @@ class LumoAuthAgent:
             data["scope"] = " ".join(scopes)
 
         resp = requests.post(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/token",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/oauth/token",
             data=data,
             timeout=30,
             verify=self._verify_tls,
@@ -188,7 +188,7 @@ class LumoAuthAgent:
         self.ensure_authenticated()
 
         resp = requests.get(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/userinfo",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/oauth/userinfo",
             headers=self._auth_headers(),
             timeout=30,
             verify=self._verify_tls,
@@ -267,7 +267,7 @@ class LumoAuthAgent:
             body["context"] = context
 
         resp = requests.post(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/ask",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/agents/ask",
             headers=self._auth_headers(),
             json=body,
             timeout=30,
@@ -303,7 +303,7 @@ class LumoAuthAgent:
         self.ensure_authenticated()
 
         resp = requests.get(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/me",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/agents/me",
             headers=self._auth_headers(),
             timeout=30,
             verify=self._verify_tls,
@@ -405,7 +405,7 @@ class LumoAuthAgent:
             body["jwks_uri"] = jwks_uri
 
         resp = requests.post(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/register",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/agents/register",
             headers=self._auth_headers(),
             json=body,
             timeout=30,
@@ -453,7 +453,7 @@ class LumoAuthAgent:
         }
 
         resp = requests.post(
-            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/token",
+            f"{self.base_url}/orgs/{self.org_id}/api/v1/oauth/token",
             data=data,
             timeout=30,
             verify=self._verify_tls,

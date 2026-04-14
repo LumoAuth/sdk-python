@@ -75,7 +75,7 @@ class AAuthClient:
         self.base_url: str = base_url or os.environ.get(
             "LUMOAUTH_URL", "https://app.lumoauth.dev"
         )
-        self.tenant: str = org_id or os.environ.get("LUMOAUTH_ORG_ID", "")
+        self.org_id: str = org_id or os.environ.get("LUMOAUTH_ORG_ID", "")
         self._verify_tls: bool = not skip_cert_validation
 
         # Import cryptography lazily so the rest of the SDK works without it.
@@ -190,7 +190,7 @@ class AAuthClient:
     # =========================================================================
 
     def _token_url(self) -> str:
-        return f"{self.base_url}/orgs/{self.tenant}/api/v1/aauth/agent/token"
+        return f"{self.base_url}/orgs/{self.org_id}/api/v1/aauth/agent/token"
 
     def request_authorization(
         self,
