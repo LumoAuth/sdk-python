@@ -27,7 +27,7 @@ pip install -e "./path/to/lumoauth[aauth]" # core + AAuth
 | Variable | Description | Default |
 | --- | --- | --- |
 | `LUMOAUTH_URL` | LumoAuth instance URL | `https://app.lumoauth.dev` |
-| `LUMOAUTH_TENANT` | Tenant slug | *(required)* |
+| `LUMOAUTH_ORG_ID` | Organization ID | *(required)* |
 | `AGENT_CLIENT_ID` | Agent OAuth client ID | *(required)* |
 | `AGENT_CLIENT_SECRET` | Agent OAuth client secret | *(required)* |
 
@@ -40,7 +40,7 @@ All four can also be passed directly to the `LumoAuthAgent` constructor.
 ```python
 from lumoauth import LumoAuthAgent
 
-# Reads LUMOAUTH_URL, LUMOAUTH_TENANT, AGENT_CLIENT_ID, AGENT_CLIENT_SECRET
+# Reads LUMOAUTH_URL, LUMOAUTH_ORG_ID, AGENT_CLIENT_ID, AGENT_CLIENT_SECRET
 # from environment variables automatically.
 agent = LumoAuthAgent()
 agent.authenticate()
@@ -322,7 +322,7 @@ print(json.dumps(jwks, indent=2))
 client = AAuthClient(
     agent_identifier="https://my-agent.example.com",
     private_key_pem=open("agent-key.pem").read(),
-    tenant="acme-corp",
+    org_id="acme-corp",
 )
 ```
 
@@ -551,7 +551,7 @@ class ResearchAgent(LumoAuthAgent):
     def search_web(self, query: str) -> dict:
         return self.api_request(
             "POST",
-            f"/t/{self.tenant}/api/v1/tools/search",
+            f"/orgs/{self.tenant}/api/v1/tools/search",
             data={"query": query},
         ).json()
 
@@ -592,7 +592,7 @@ from lumoauth import LumoAuthAgent
 aauth = AAuthClient(
     agent_identifier="https://my-agent.example.com",
     private_key_pem=open("agent-key.pem").read(),
-    tenant="acme-corp",
+    org_id="acme-corp",
 )
 tokens = aauth.request_authorization(
     resource_token=resource_tok,

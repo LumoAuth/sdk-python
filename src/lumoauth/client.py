@@ -41,7 +41,7 @@ class LumoAuthAgent:
     def __init__(
         self,
         base_url: str | None = None,
-        tenant: str | None = None,
+        org_id: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
         skip_cert_validation: bool = False,
@@ -54,7 +54,7 @@ class LumoAuthAgent:
         Parameter        Environment variable
         ===============  ========================
         ``base_url``     ``LUMOAUTH_URL``
-        ``tenant``       ``LUMOAUTH_TENANT``
+        ``org_id``       ``LUMOAUTH_ORG_ID``
         ``client_id``    ``AGENT_CLIENT_ID``
         ``client_secret`` ``AGENT_CLIENT_SECRET``
         ===============  ========================
@@ -66,7 +66,7 @@ class LumoAuthAgent:
             base_url or os.environ.get("LUMOAUTH_URL", "https://app.lumoauth.dev")
         )
         self.tenant: str = (
-            tenant or os.environ.get("LUMOAUTH_TENANT", "")
+            org_id or os.environ.get("LUMOAUTH_ORG_ID", "")
         )
         self.client_id: str = client_id or os.environ.get("AGENT_CLIENT_ID", "")
         self.client_secret: str = client_secret or os.environ.get("AGENT_CLIENT_SECRET", "")
@@ -120,7 +120,7 @@ class LumoAuthAgent:
             ``True`` on success, ``False`` on failure (details are logged).
         """
         logger.info(
-            "Authenticating agent (base_url=%s, tenant=%s, client_id=%s…)",
+            "Authenticating agent (base_url=%s, org_id=%s, client_id=%s…)",
             self.base_url,
             self.tenant,
             self.client_id[:12],
@@ -135,7 +135,7 @@ class LumoAuthAgent:
             data["scope"] = " ".join(scopes)
 
         resp = requests.post(
-            f"{self.base_url}/t/{self.tenant}/api/v1/oauth/token",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/token",
             data=data,
             timeout=30,
             verify=self._verify_tls,
@@ -188,7 +188,7 @@ class LumoAuthAgent:
         self.ensure_authenticated()
 
         resp = requests.get(
-            f"{self.base_url}/t/{self.tenant}/api/v1/oauth/userinfo",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/userinfo",
             headers=self._auth_headers(),
             timeout=30,
             verify=self._verify_tls,
@@ -267,7 +267,7 @@ class LumoAuthAgent:
             body["context"] = context
 
         resp = requests.post(
-            f"{self.base_url}/t/{self.tenant}/api/v1/agents/ask",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/ask",
             headers=self._auth_headers(),
             json=body,
             timeout=30,
@@ -303,7 +303,7 @@ class LumoAuthAgent:
         self.ensure_authenticated()
 
         resp = requests.get(
-            f"{self.base_url}/t/{self.tenant}/api/v1/agents/me",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/me",
             headers=self._auth_headers(),
             timeout=30,
             verify=self._verify_tls,
@@ -373,7 +373,7 @@ class LumoAuthAgent:
     ) -> dict[str, Any]:
         """Register this agent with LumoAuth.
 
-        Creates or updates the agent record in the tenant directory.
+        Creates or updates the agent record in the organization directory.
         The ``client_id`` / ``client_secret`` on this instance are used
         for identification.
 
@@ -405,7 +405,7 @@ class LumoAuthAgent:
             body["jwks_uri"] = jwks_uri
 
         resp = requests.post(
-            f"{self.base_url}/t/{self.tenant}/api/v1/agents/register",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/agents/register",
             headers=self._auth_headers(),
             json=body,
             timeout=30,
@@ -453,7 +453,7 @@ class LumoAuthAgent:
         }
 
         resp = requests.post(
-            f"{self.base_url}/t/{self.tenant}/api/v1/oauth/token",
+            f"{self.base_url}/orgs/{self.tenant}/api/v1/oauth/token",
             data=data,
             timeout=30,
             verify=self._verify_tls,

@@ -107,7 +107,7 @@ class JITContext:
         return {"Authorization": f"Bearer {self._bearer()}"}
 
     def _api(self, path: str) -> str:
-        return f"{self._agent.base_url}/t/{self._agent.tenant}/api/v1{path}"
+        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1{path}"
 
     # =========================================================================
     # Delegation (on-behalf-of)

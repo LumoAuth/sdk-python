@@ -71,7 +71,7 @@ class DelegationChain:
         token = chain.exchange("session_1", scopes=["read:documents"])
 
         # Make delegated API calls
-        resp = chain.request("session_1", "GET", "/t/acme/api/v1/documents")
+        resp = chain.request("session_1", "GET", "/orgs/acme/api/v1/documents")
     """
 
     def __init__(
@@ -99,10 +99,10 @@ class DelegationChain:
     # -- internal helpers -----------------------------------------------------
 
     def _token_url(self) -> str:
-        return f"{self._agent.base_url}/t/{self._agent.tenant}/api/v1/oauth/token"
+        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/token"
 
     def _authorize_url(self) -> str:
-        return f"{self._agent.base_url}/t/{self._agent.tenant}/api/v1/oauth/authorize"
+        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/authorize"
 
     # =========================================================================
     # Step 1: User consent flow
@@ -534,7 +534,7 @@ class DelegationChain:
 
         if user.refresh_token:
             resp = requests.post(
-                f"{self._agent.base_url}/t/{self._agent.tenant}/api/v1/oauth/revoke",
+                f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/revoke",
                 data={
                     "token": user.refresh_token,
                     "token_type_hint": "refresh_token",
