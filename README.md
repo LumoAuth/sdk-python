@@ -551,7 +551,7 @@ class ResearchAgent(LumoAuthAgent):
     def search_web(self, query: str) -> dict:
         return self.api_request(
             "POST",
-            f"/orgs/{self.tenant}/api/v1/tools/search",
+            f"/orgs/{self.org_id}/api/v1/tools/search",
             data={"query": query},
         ).json()
 
