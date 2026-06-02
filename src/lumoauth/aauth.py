@@ -372,8 +372,11 @@ class AAuthClient:
     ) -> requests.Response:
         """Make a signed, authenticated request to a protected resource.
 
-        The request carries both a ``Bearer`` token **and** an
-        ``Agent-Auth`` HTTP message signature.
+        The request carries the ``Bearer`` access token **and** an RFC 9421
+        HTTP Message Signature that provides proof-of-possession of the key
+        bound to the token's ``cnf.jwk``. Because the signature covers the
+        ``authorization`` component, it is computed over the *actual* Bearer
+        header so a resource server can verify it.
 
         Args:
             method: HTTP verb.
@@ -382,15 +385,11 @@ class AAuthClient:
             data: JSON body (for POST/PUT).
             timeout: HTTP timeout.
         """
-        body_bytes = json.dumps(data).encode() if data else None
-        sig_headers = self.sign_request(method, url, body=body_bytes)
+        body_bytes = json.dumps(data).encode() if data else b""
+        authorization = f"Bearer {auth_token}"
+        sig_headers = self.sign_request(method, url, body=body_bytes, authorization=authorization)
 
-        headers: dict[str, str] = {
-            "Authorization": f"Bearer {auth_token}",
-            **sig_headers,
-        }
-        if body_bytes is not None:
-            headers["Content-Type"] = "application/json"
+        headers: dict[str, str] = {"Authorization": authorization, **sig_headers}
 
         return requests.request(
             method, url, headers=headers, data=body_bytes, timeout=timeout,
