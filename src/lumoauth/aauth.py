@@ -44,9 +44,10 @@ class AAuthClient:
         tokens = client.request_authorization(
             resource_token=resource_tok,
             scope="read write",
+            agent_token=agent_tok,
         )
         resp = client.signed_request("GET", "https://api.example.com/v1/data",
-                                     auth_token=tokens["access_token"])
+                                     auth_token=tokens["auth_token"])
     """
 
     def __init__(
