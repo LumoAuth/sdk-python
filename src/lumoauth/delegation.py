@@ -21,7 +21,7 @@ __all__ = ["DelegationChain"]
 @runtime_checkable
 class _AgentLike(Protocol):
     base_url: str
-    tenant: str
+    org_id: str
     client_id: str
     client_secret: str
 
@@ -99,10 +99,10 @@ class DelegationChain:
     # -- internal helpers -----------------------------------------------------
 
     def _token_url(self) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/token"
+        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/token"
 
     def _authorize_url(self) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/authorize"
+        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/authorize"
 
     # =========================================================================
     # Step 1: User consent flow
@@ -534,7 +534,7 @@ class DelegationChain:
 
         if user.refresh_token:
             resp = requests.post(
-                f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1/oauth/revoke",
+                f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/revoke",
                 data={
                     "token": user.refresh_token,
                     "token_type_hint": "refresh_token",

@@ -32,6 +32,10 @@ dependencies = [
 aauth = [
     "cryptography>=41.0",
 ]
+fastapi = [
+    "fastapi>=0.110.0",
+    "itsdangerous>=2.1.2",
+]
 
 [project.urls]
 Documentation = "https://docs.lumoauth.dev/agents/registry"

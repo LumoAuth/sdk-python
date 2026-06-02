@@ -8,7 +8,7 @@ Quick start::
     agent.authenticate()
 
     if agent.has_capability("read:documents"):
-        resp = agent.api_request("GET", f"/orgs/{agent.tenant}/api/v1/documents/123")
+        resp = agent.api_request("GET", f"/orgs/{agent.org_id}/api/v1/documents/123")
 
 Delegation (Chain of Agency — RFC 8693 token exchange)::
 
@@ -35,6 +35,7 @@ from lumoauth.decorators import require_capability
 from lumoauth.delegation import DelegationChain
 from lumoauth.jit import JITContext
 from lumoauth.aauth import AAuthClient
+from lumoauth.approval import require_approval, ApprovalResult
 
 __all__ = [
     "LumoAuthAgent",
@@ -42,4 +43,6 @@ __all__ = [
     "JITContext",
     "AAuthClient",
     "require_capability",
+    "require_approval",
+    "ApprovalResult",
 ]

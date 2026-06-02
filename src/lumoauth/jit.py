@@ -17,13 +17,13 @@ __all__ = ["JITContext"]
 
 # ---------------------------------------------------------------------------
 # Minimal protocol so JITContext works with *any* authenticated agent object
-# that exposes a bearer token and the usual base_url / tenant pair.
+# that exposes a bearer token and the usual base_url / org_id pair.
 # ---------------------------------------------------------------------------
 
 @runtime_checkable
 class _TokenBearer(Protocol):
     base_url: str
-    tenant: str
+    org_id: str
 
     @property
     def access_token(self) -> str | None: ...
@@ -75,7 +75,7 @@ class JITContext:
         """Initialise from an authenticated agent.
 
         Args:
-            agent: Any object that exposes ``base_url``, ``tenant`` and an
+            agent: Any object that exposes ``base_url``, ``org_id`` and an
                 ``access_token`` property (e.g. :class:`LumoAuthAgent`).
             delegated_token: Optional on-behalf-of token (from
                 :meth:`delegate_on_behalf_of`).  When set, JIT requests
@@ -107,7 +107,7 @@ class JITContext:
         return {"Authorization": f"Bearer {self._bearer()}"}
 
     def _api(self, path: str) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.tenant}/api/v1{path}"
+        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1{path}"
 
     # =========================================================================
     # Delegation (on-behalf-of)
