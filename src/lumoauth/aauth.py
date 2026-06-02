@@ -7,9 +7,10 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -137,6 +138,12 @@ class AAuthClient:
     # HTTP Message Signing (RFC 9421)
     # =========================================================================
 
+    # Covered components the AAuth agent token endpoint requires, in order.
+    _COVERED = (
+        "@method", "@authority", "@path",
+        "signature-key", "content-digest", "content-type", "authorization",
+    )
+
     def sign_request(
         self,
         method: str,
@@ -144,46 +151,69 @@ class AAuthClient:
         *,
         body: bytes | None = None,
         content_type: str = "application/json",
+        agent_token: str | None = None,
+        authorization: str = "",
+        signature_key: str = "",
     ) -> dict[str, str]:
-        """Create RFC 9421 signature headers for an HTTP request.
+        """Create RFC 9421 signature headers for the AAuth agent token endpoint.
 
-        Returns a dict of headers to merge into the outgoing request
-        (``Agent-Auth`` and optionally ``Content-Digest``).
+        Builds the standard ``Signature-Input`` / ``Signature`` headers per the
+        AAuth profile the server enforces: the covered components are exactly
+        ``@method @authority @path signature-key content-digest content-type
+        authorization`` with both ``created`` (within ±60 s) and a fresh
+        ``nonce`` (≥ 12 bytes of entropy). The Ed25519 signature is base64url
+        encoded. The agent's credential travels in ``Agent-Auth`` as
+        ``agent_token=<JWT>`` — not inside the signature.
 
         Args:
-            method: HTTP verb (uppercased).
+            method: HTTP verb.
             url: Full target URI.
-            body: Raw request body bytes (required for POST/PUT).
+            body: Raw request body bytes.
             content_type: Media type of the body.
+            agent_token: The ``agent+jwt`` to present in ``Agent-Auth``.
+            authorization: Value of a covered ``Authorization`` header, if any.
+            signature_key: Value of a covered ``Signature-Key`` header, if any.
         """
-        components: list[str] = [
-            f'"@method": {method.upper()}',
-            f'"@target-uri": {url}',
-        ]
-        extra_headers: dict[str, str] = {}
+        parsed = urlsplit(url)
+        authority = parsed.netloc
+        path = parsed.path or "/"
 
-        if body is not None:
-            digest_b64 = base64.b64encode(hashlib.sha256(body).digest()).decode()
-            content_digest = f"sha-256=:{digest_b64}:"
-            components.append(f'"content-type": {content_type}')
-            components.append(f'"content-digest": {content_digest}')
-            extra_headers["Content-Digest"] = content_digest
+        body_bytes = body if body is not None else b""
+        # Content-Digest uses STANDARD base64 (the server base64-decodes it).
+        digest_b64 = base64.b64encode(hashlib.sha256(body_bytes).digest()).decode()
+        content_digest = f"sha-256=:{digest_b64}:"
 
-        sig_base = "\n".join(components)
-        signature = self._private_key.sign(sig_base.encode())
-        sig_b64 = base64.b64encode(signature).decode()
-
-        covered = " ".join(c.split('"')[1] for c in components)
         created = math.floor(time.time())
+        nonce = _b64url(os.urandom(16))  # >= 12 bytes of entropy
 
-        agent_auth = (
-            f'sig1=:{sig_b64}:; label="sig1"; alg="ed25519"; '
-            f'keyid="{self.agent_identifier}#{self.kid}"; '
-            f"created={created}; "
-            f'covered="{covered}"'
-        )
-        extra_headers["Agent-Auth"] = agent_auth
-        return extra_headers
+        values = {
+            "@method": method.upper(),
+            "@authority": authority,
+            "@path": path,
+            "signature-key": signature_key,
+            "content-digest": content_digest,
+            "content-type": content_type,
+            "authorization": authorization,
+        }
+        lines = [f'"{c}": {values[c]}' for c in self._COVERED]
+        covered_list = " ".join(f'"{c}"' for c in self._COVERED)
+        # The @signature-params line carries ONLY created + nonce.
+        params = f'({covered_list});created={created};nonce="{nonce}"'
+        lines.append(f'"@signature-params": {params}')
+        sig_base = "\n".join(lines)
+
+        signature = self._private_key.sign(sig_base.encode())
+        sig_b64url = _b64url(signature)  # base64url, per RFC 9421
+
+        headers: dict[str, str] = {
+            "Content-Digest": content_digest,
+            "Content-Type": content_type,
+            "Signature-Input": f"sig1=({covered_list});created={created};nonce=\"{nonce}\"",
+            "Signature": f"sig1=:{sig_b64url}:",
+        }
+        if agent_token:
+            headers["Agent-Auth"] = f"agent_token={agent_token}"
+        return headers
 
     # =========================================================================
     # Token flows
@@ -221,21 +251,24 @@ class AAuthClient:
             "auth_url": "…", "request_token": "…"}`` when user consent is
             needed.
         """
+        if not agent_token:
+            raise ValueError(
+                "agent_token is required — the /agent/token endpoint authenticates "
+                "the agent via the Agent-Auth header, not the request body."
+            )
+
         body_dict: dict[str, Any] = {
             "request_type": "auth",
             "resource_token": resource_token,
             "scope": scope,
         }
-        if agent_token:
-            body_dict["agent_token"] = agent_token
         if redirect_uri:
             body_dict["redirect_uri"] = redirect_uri
 
         url = self._token_url()
         body_bytes = json.dumps(body_dict).encode()
-        sig_headers = self.sign_request("POST", url, body=body_bytes)
-
-        headers = {"Content-Type": "application/json", **sig_headers}
+        # agent_token rides in Agent-Auth; sign_request also emits Content-Type.
+        headers = self.sign_request("POST", url, body=body_bytes, agent_token=agent_token)
         resp = requests.post(url, headers=headers, data=body_bytes, timeout=timeout,
                              verify=self._verify_tls)
 
@@ -261,6 +294,7 @@ class AAuthClient:
         code: str,
         request_token: str,
         *,
+        agent_token: str,
         timeout: int = 30,
     ) -> dict[str, Any]:
         """Exchange an authorisation code for tokens (AAuth Flow 3, step 6).
@@ -268,6 +302,7 @@ class AAuthClient:
         Args:
             code: Authorisation code from the consent redirect.
             request_token: Request token returned in the original 401.
+            agent_token: The ``agent+jwt`` presented in ``Agent-Auth``.
         """
         body_dict = {
             "request_type": "code",
@@ -276,9 +311,7 @@ class AAuthClient:
         }
         url = self._token_url()
         body_bytes = json.dumps(body_dict).encode()
-        sig_headers = self.sign_request("POST", url, body=body_bytes)
-
-        headers = {"Content-Type": "application/json", **sig_headers}
+        headers = self.sign_request("POST", url, body=body_bytes, agent_token=agent_token)
         resp = requests.post(url, headers=headers, data=body_bytes, timeout=timeout,
                              verify=self._verify_tls)
 
@@ -294,6 +327,7 @@ class AAuthClient:
         refresh_token: str,
         scope: str | None = None,
         *,
+        agent_token: str,
         timeout: int = 30,
     ) -> dict[str, Any]:
         """Refresh an auth token.
@@ -301,6 +335,7 @@ class AAuthClient:
         Args:
             refresh_token: The refresh token from a prior token response.
             scope: Optional scope to narrow the refreshed token.
+            agent_token: The ``agent+jwt`` presented in ``Agent-Auth``.
         """
         body_dict: dict[str, Any] = {
             "request_type": "refresh",
@@ -311,9 +346,7 @@ class AAuthClient:
 
         url = self._token_url()
         body_bytes = json.dumps(body_dict).encode()
-        sig_headers = self.sign_request("POST", url, body=body_bytes)
-
-        headers = {"Content-Type": "application/json", **sig_headers}
+        headers = self.sign_request("POST", url, body=body_bytes, agent_token=agent_token)
         resp = requests.post(url, headers=headers, data=body_bytes, timeout=timeout,
                              verify=self._verify_tls)
 
