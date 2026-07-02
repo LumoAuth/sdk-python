@@ -293,22 +293,33 @@ class AAuthClient:
     def exchange_code(
         self,
         code: str,
-        request_token: str,
+        redirect_uri: str,
         *,
         agent_token: str,
         timeout: int = 30,
     ) -> dict[str, Any]:
-        """Exchange an authorisation code for tokens (AAuth Flow 3, step 6).
+        """Exchange an authorisation code for tokens (``request_type=code``).
+
+        The server redeems the code atomically (single use) and rejects it
+        if it was presented with a different ``redirect_uri`` than the one
+        the code was delivered to.
+
+        .. versionchanged:: 0.2.0
+            The second parameter is now ``redirect_uri`` (previously
+            ``request_token``, which the server never accepted for
+            ``request_type=code``). ``redirect_uri`` must exactly match the
+            registered URI the consent redirect delivered the code to.
 
         Args:
             code: Authorisation code from the consent redirect.
-            request_token: Request token returned in the original 401.
+            redirect_uri: The exact redirect URI the code was delivered to
+                (must match a URI registered for the agent).
             agent_token: The ``agent+jwt`` presented in ``Agent-Auth``.
         """
         body_dict = {
             "request_type": "code",
             "code": code,
-            "request_token": request_token,
+            "redirect_uri": redirect_uri,
         }
         url = self._token_url()
         body_bytes = json.dumps(body_dict).encode()
@@ -326,21 +337,35 @@ class AAuthClient:
     def refresh(
         self,
         refresh_token: str,
-        scope: str | None = None,
+        resource_token: str,
         *,
+        scope: str | None = None,
         agent_token: str,
         timeout: int = 30,
     ) -> dict[str, Any]:
-        """Refresh an auth token.
+        """Refresh an auth token (``request_type=refresh``).
+
+        The server requires a **fresh resource token** for the target
+        resource on every refresh; scopes requested via the resource token
+        must be a subset of the original grant. The refresh token itself is
+        not rotated.
+
+        .. versionchanged:: 0.2.0
+            ``resource_token`` is now a required second positional parameter
+            (the server rejects refresh requests without it), and ``scope``
+            became keyword-only.
 
         Args:
             refresh_token: The refresh token from a prior token response.
-            scope: Optional scope to narrow the refreshed token.
+            resource_token: A fresh resource token for the target resource.
+            scope: Optional scope to narrow the refreshed token (must be a
+                subset of the originally granted scopes).
             agent_token: The ``agent+jwt`` presented in ``Agent-Auth``.
         """
         body_dict: dict[str, Any] = {
             "request_type": "refresh",
             "refresh_token": refresh_token,
+            "resource_token": resource_token,
         }
         if scope:
             body_dict["scope"] = scope

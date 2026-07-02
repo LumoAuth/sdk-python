@@ -346,25 +346,36 @@ URL to redirect the user to. After the user grants consent, exchange the
 code:
 
 ```python
+redirect_uri = "https://my-agent.example.com/callback"
+
 result = client.request_authorization(
     resource_token=resource_tok,
     scope="read write",
-    redirect_uri="https://my-agent.example.com/callback",
+    agent_token=agent_tok,
+    redirect_uri=redirect_uri,
 )
 
 if result.get("authorization_required"):
     # Redirect user to result["auth_url"]
     print(f"Please visit: {result['auth_url']}")
 
-    # After callback, exchange the code
+    # After callback, exchange the code. redirect_uri must be the exact
+    # URI the code was delivered to.
     code = "..."  # from the redirect query string
-    tokens = client.exchange_code(code, result["request_token"])
+    tokens = client.exchange_code(code, redirect_uri, agent_token=agent_tok)
 ```
 
 ### Token refresh
 
+A refresh requires a **fresh resource token** for the target resource;
+the refresh token itself is not rotated:
+
 ```python
-new_tokens = client.refresh(tokens["refresh_token"])
+new_tokens = client.refresh(
+    tokens["refresh_token"],
+    fresh_resource_tok,
+    agent_token=agent_tok,
+)
 ```
 
 ### Signed requests to protected resources
@@ -647,8 +658,8 @@ with JITContext(agent) as jit:
 | `generate_keypair()` *(static)* | Generate Ed25519 key pair + JWKS |
 | `sign_request(method, url, …)` | RFC 9421 HTTP message signature headers |
 | `request_authorization(resource_token, scope, …)` | Obtain auth token (direct or user-consent) |
-| `exchange_code(code, request_token)` | Exchange consent code for tokens |
-| `refresh(refresh_token, scope=None)` | Refresh an auth token |
+| `exchange_code(code, redirect_uri)` | Exchange consent code for tokens |
+| `refresh(refresh_token, resource_token, scope=None)` | Refresh an auth token (fresh resource token required) |
 | `signed_request(method, url, auth_token=…, …)` | Authenticated + signed HTTP request |
 | `discover_issuer()` | Fetch `/.well-known/aauth-issuer` |
 | `discover_resource(resource_url)` | Fetch `/.well-known/aauth-resource` |
@@ -671,6 +682,23 @@ Decorator for `LumoAuthAgent` methods. Raises `PermissionError` if the
 agent lacks the named capability.
 
 ---
+
+## Changelog
+
+### 0.2.0
+
+**Breaking fixes** — the AAuth client now matches the AAuth 1.0 server
+contract for the agent token endpoint:
+
+- `AAuthClient.exchange_code(code, redirect_uri, *, agent_token)`: the
+  second parameter is now `redirect_uri` (previously `request_token`).
+  The server's `request_type=code` redemption requires `code` +
+  `redirect_uri` and never accepted `request_token`; the code is bound to
+  the exact redirect URI it was delivered to.
+- `AAuthClient.refresh(refresh_token, resource_token, *, scope=None,
+  agent_token)`: a fresh `resource_token` for the target resource is now a
+  required second positional parameter (the server rejects
+  `request_type=refresh` without it), and `scope` became keyword-only.
 
 ## License
 

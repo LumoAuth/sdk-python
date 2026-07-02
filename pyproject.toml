@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lumoauth"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python SDK for LumoAuth Agent authentication and capability management"
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,3 +43,7 @@ Repository = "https://github.com/lumoauth/lumoauth-python"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lumoauth"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
