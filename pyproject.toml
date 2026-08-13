@@ -36,10 +36,13 @@ fastapi = [
     "fastapi>=0.110.0",
     "itsdangerous>=2.1.2",
 ]
+dev = [
+    "pytest>=7.0",
+]
 
 [project.urls]
 Documentation = "https://docs.lumoauth.dev/agents/registry"
-Repository = "https://github.com/lumoauth/lumoauth-python"
+Repository = "https://github.com/lumoauth/python"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lumoauth"]
