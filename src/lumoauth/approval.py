@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Literal, Mapping, Optional
 import time
 
+from lumoauth._routes import format_path
+from lumoauth.errors import LumoAuthConfigError, LumoAuthValidationError
+
 ApprovalImpact = Literal["low", "medium", "high", "critical"]
 ApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 
@@ -64,19 +67,20 @@ def require_approval(
     and auto-refresh.
     """
     if not task_id:
-        raise ValueError("task_id is required")
+        raise LumoAuthValidationError("task_id is required")
     if not reason:
-        raise ValueError("reason is required")
+        raise LumoAuthValidationError("reason is required")
     if impact not in ("low", "medium", "high", "critical"):
-        raise ValueError(f"invalid impact: {impact!r}")
+        raise LumoAuthValidationError(f"invalid impact: {impact!r}")
 
     org_id = getattr(agent, "org_id", None)
     if not org_id:
-        raise RuntimeError("agent has no org_id; call agent.authenticate() first")
+        raise LumoAuthConfigError("agent has no org_id; call agent.authenticate() first")
 
+    _, create_path = format_path("approvals.create", org_id=org_id)
     create_resp = agent.api_request(
         "POST",
-        f"/orgs/{org_id}/api/v1/agents/me/approvals",
+        create_path,
         json={
             "task_id": task_id,
             "reason": reason,
@@ -93,9 +97,10 @@ def require_approval(
     last: Dict[str, Any] = {"status": "pending"}
     while time.monotonic() < deadline:
         time.sleep(poll_interval_s)
+        _, status_path = format_path("approvals.status", org_id=org_id, token=token)
         status_resp = agent.api_request(
             "GET",
-            f"/orgs/{org_id}/api/v1/agents/me/approvals/{token}/status",
+            status_path,
         )
         status_resp.raise_for_status()
         last = status_resp.json()

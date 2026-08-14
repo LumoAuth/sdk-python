@@ -14,6 +14,9 @@ from urllib.parse import urlencode, urlsplit
 
 import requests
 
+from lumoauth._routes import format_path
+from lumoauth.errors import LumoAuthApiError, LumoAuthValidationError
+
 logger = logging.getLogger("lumoauth.aauth")
 
 __all__ = ["AAuthClient"]
@@ -22,6 +25,14 @@ __all__ = ["AAuthClient"]
 def _b64url(data: bytes) -> str:
     """Base64url-encode *data* without padding (RFC 7515 §2)."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _safe_json(resp: requests.Response) -> Any:
+    """Best-effort JSON body for error reporting."""
+    try:
+        return resp.json()
+    except Exception:
+        return None
 
 
 class AAuthClient:
@@ -221,7 +232,8 @@ class AAuthClient:
     # =========================================================================
 
     def _token_url(self) -> str:
-        return f"{self.base_url}/orgs/{self.org_id}/api/v1/aauth/agent/token"
+        _, path = format_path("aauth.agent.token", org_id=self.org_id)
+        return f"{self.base_url}{path}"
 
     def request_authorization(
         self,
@@ -253,7 +265,7 @@ class AAuthClient:
             needed.
         """
         if not agent_token:
-            raise ValueError(
+            raise LumoAuthValidationError(
                 "agent_token is required — the /agent/token endpoint authenticates "
                 "the agent via the Agent-Auth header, not the request body."
             )
@@ -286,8 +298,10 @@ class AAuthClient:
                 "request_token": data.get("request_token", ""),
             }
 
-        raise RuntimeError(
-            f"AAuth authorization failed: HTTP {resp.status_code} — {resp.text}"
+        raise LumoAuthApiError(
+            f"AAuth authorization failed: HTTP {resp.status_code} — {resp.text}",
+            status_code=resp.status_code,
+            body=_safe_json(resp),
         )
 
     def exchange_code(
@@ -328,8 +342,10 @@ class AAuthClient:
                              verify=self._verify_tls)
 
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"AAuth code exchange failed: HTTP {resp.status_code} — {resp.text}"
+            raise LumoAuthApiError(
+                f"AAuth code exchange failed: HTTP {resp.status_code} — {resp.text}",
+                status_code=resp.status_code,
+                body=_safe_json(resp),
             )
         logger.info("AAuth code exchange successful")
         return resp.json()
@@ -377,8 +393,10 @@ class AAuthClient:
                              verify=self._verify_tls)
 
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"AAuth refresh failed: HTTP {resp.status_code} — {resp.text}"
+            raise LumoAuthApiError(
+                f"AAuth refresh failed: HTTP {resp.status_code} — {resp.text}",
+                status_code=resp.status_code,
+                body=_safe_json(resp),
             )
         logger.info("AAuth token refreshed")
         return resp.json()
@@ -428,8 +446,9 @@ class AAuthClient:
 
     def discover_issuer(self, *, timeout: int = 10) -> dict[str, Any]:
         """Fetch ``/.well-known/aauth-issuer`` from the authorisation server."""
+        _, path = format_path("wellknown.aauth_issuer")
         resp = requests.get(
-            f"{self.base_url}/.well-known/aauth-issuer", timeout=timeout,
+            f"{self.base_url}{path}", timeout=timeout,
             verify=self._verify_tls,
         )
         resp.raise_for_status()

@@ -5,13 +5,19 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
-from urllib.parse import urlencode
 
 import requests
 
+from lumoauth._http import HttpClient
+from lumoauth.errors import (
+    LumoAuthApiError,
+    LumoAuthPermissionDeniedError,
+)
+from lumoauth.resources.delegation import MAX_DELEGATION_DEPTH, DelegationResource
+
 logger = logging.getLogger("lumoauth.delegation")
 
-__all__ = ["DelegationChain"]
+__all__ = ["DelegationChain", "MAX_DELEGATION_DEPTH"]
 
 
 # ---------------------------------------------------------------------------
@@ -29,14 +35,6 @@ class _AgentLike(Protocol):
     def access_token(self) -> str | None: ...
 
     def ensure_authenticated(self) -> bool: ...
-
-
-# RFC 8693 constants
-_ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
-_TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
-
-# Maximum delegation depth enforced by LumoAuth
-MAX_DELEGATION_DEPTH = 3
 
 
 class DelegationChain:
@@ -90,19 +88,18 @@ class DelegationChain:
         self._redirect_uri = redirect_uri or ""
         self._verify_tls: bool = getattr(agent, "_verify_tls", True)
 
+        self._http = HttpClient(
+            agent.base_url,
+            org_id=agent.org_id,
+            verify_tls=self._verify_tls,
+        )
+        self._resource = DelegationResource(self._http)
+
         # User consent tokens, keyed by session id
         self._user_tokens: Dict[str, _UserTokens] = {}
 
         # Cached delegated tokens, keyed by session id
         self._delegated_tokens: Dict[str, str] = {}
-
-    # -- internal helpers -----------------------------------------------------
-
-    def _token_url(self) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/token"
-
-    def _authorize_url(self) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/authorize"
 
     # =========================================================================
     # Step 1: User consent flow
@@ -142,17 +139,12 @@ class DelegationChain:
         scopes = scopes or ["read:documents"]
         state = state or f"session:{session_id}"
 
-        params = {
-            "response_type": "code",
-            "client_id": self._agent.client_id,
-            "redirect_uri": self._redirect_uri,
-            "scope": " ".join(scopes),
-            "state": state,
-            "prompt": "consent",
-            "access_type": "offline",
-        }
-
-        url = f"{self._authorize_url()}?{urlencode(params)}"
+        url = self._resource.consent_url(
+            client_id=self._agent.client_id,
+            redirect_uri=self._redirect_uri,
+            scopes=scopes,
+            state=state,
+        )
         logger.info(
             "Consent URL generated (session=%s, scopes=%s)",
             session_id,
@@ -180,28 +172,21 @@ class DelegationChain:
         """
         logger.info("Exchanging authorization code for user tokens (session=%s)", session_id)
 
-        resp = requests.post(
-            self._token_url(),
-            data={
-                "grant_type": "authorization_code",
-                "code": authorization_code,
-                "redirect_uri": self._redirect_uri,
-                "client_id": self._agent.client_id,
-                "client_secret": self._agent.client_secret,
-            },
-            timeout=30,
-            verify=self._verify_tls,
-        )
-
-        if resp.status_code != 200:
+        try:
+            body = self._resource.exchange_code(
+                authorization_code,
+                self._redirect_uri,
+                client_id=self._agent.client_id,
+                client_secret=self._agent.client_secret,
+            )
+        except LumoAuthApiError as exc:
             logger.error(
-                "Consent code exchange failed: HTTP %d — %s",
-                resp.status_code,
-                resp.text,
+                "Consent code exchange failed: HTTP %s — %s",
+                exc.status_code,
+                exc,
             )
             return False
 
-        body = resp.json()
         self._user_tokens[session_id] = _UserTokens(
             access_token=body["access_token"],
             refresh_token=body.get("refresh_token"),
@@ -259,7 +244,8 @@ class DelegationChain:
 
         Raises:
             LookupError: If no user token exists for *session_id*.
-            RuntimeError: If the token exchange request fails.
+            LumoAuthApiError: If the token exchange request fails
+                (subclasses ``RuntimeError``).
         """
         self._agent.ensure_authenticated()
 
@@ -267,51 +253,24 @@ class DelegationChain:
 
         logger.info("Performing RFC 8693 token exchange (session=%s)", session_id)
 
-        data: Dict[str, str] = {
-            "grant_type": _TOKEN_EXCHANGE_GRANT,
-            "subject_token": user.access_token,
-            "subject_token_type": _ACCESS_TOKEN_TYPE,
-            "actor_token": self._agent.access_token,
-            "actor_token_type": _ACCESS_TOKEN_TYPE,
-        }
-        if scopes:
-            data["scope"] = " ".join(scopes)
-
-        resp = requests.post(
-            self._token_url(),
-            data=data,
-            timeout=30,
-            verify=self._verify_tls,
+        body = self._exchange_tokens(
+            subject_token=user.access_token,
+            actor_token=self._agent.access_token or "",
+            scopes=scopes,
+            forbidden_message=(
+                "Token exchange forbidden — agent may lack 'delegate:on_behalf' capability"
+            ),
+            failed_prefix="Token exchange failed",
         )
 
-        if resp.status_code == 200:
-            token = resp.json()["access_token"]
-            self._delegated_tokens[session_id] = token
-            logger.info(
-                "Token exchange successful (session=%s, expires_in=%s)",
-                session_id,
-                resp.json().get("expires_in"),
-            )
-            return token
-
-        if resp.status_code == 403:
-            error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            if error.get("error") == "delegation_depth_exceeded":
-                raise RuntimeError(
-                    f"Delegation chain too deep (max depth: {error.get('max_depth', MAX_DELEGATION_DEPTH)})"
-                )
-            raise RuntimeError(
-                f"Token exchange forbidden — agent may lack 'delegate:on_behalf' capability: "
-                f"{error.get('error_description', resp.text)}"
-            )
-
-        error_text = resp.text
-        try:
-            error_json = resp.json()
-            error_text = error_json.get("error_description", error_json.get("error", resp.text))
-        except Exception:
-            pass
-        raise RuntimeError(f"Token exchange failed (HTTP {resp.status_code}): {error_text}")
+        token = body["access_token"]
+        self._delegated_tokens[session_id] = token
+        logger.info(
+            "Token exchange successful (session=%s, expires_in=%s)",
+            session_id,
+            body.get("expires_in"),
+        )
+        return token
 
     # =========================================================================
     # Step 3: Delegated API requests
@@ -347,16 +306,14 @@ class DelegationChain:
         if not token:
             token = self.exchange(session_id)
 
-        url = endpoint if endpoint.startswith("http") else f"{self._agent.base_url}{endpoint}"
-
-        return requests.request(
+        return self._http.request(
             method,
-            url,
-            headers={"Authorization": f"Bearer {token}"},
+            endpoint,
             json=data,
             params=params,
             timeout=timeout,
-            verify=self._verify_tls,
+            headers={"Authorization": f"Bearer {token}"},
+            raw=True,
         )
 
     # =========================================================================
@@ -388,8 +345,8 @@ class DelegationChain:
             A delegated access token for the sub-agent.
 
         Raises:
-            RuntimeError: If the nested exchange fails or the delegation
-                chain is too deep.
+            LumoAuthApiError: If the nested exchange fails or the delegation
+                chain is too deep (subclasses ``RuntimeError``).
         """
         our_token = self._delegated_tokens.get(session_id)
         if not our_token:
@@ -397,39 +354,17 @@ class DelegationChain:
 
         logger.info("Creating nested delegation to sub-agent (session=%s)", session_id)
 
-        data: Dict[str, str] = {
-            "grant_type": _TOKEN_EXCHANGE_GRANT,
-            "subject_token": our_token,
-            "subject_token_type": _ACCESS_TOKEN_TYPE,
-            "actor_token": sub_agent_token,
-            "actor_token_type": _ACCESS_TOKEN_TYPE,
-        }
-        if scopes:
-            data["scope"] = " ".join(scopes)
-
-        resp = requests.post(
-            self._token_url(),
-            data=data,
-            timeout=30,
-            verify=self._verify_tls,
+        body = self._exchange_tokens(
+            subject_token=our_token,
+            actor_token=sub_agent_token,
+            scopes=scopes,
+            forbidden_message="Nested delegation forbidden",
+            failed_prefix="Nested delegation failed",
         )
 
-        if resp.status_code == 200:
-            token = resp.json()["access_token"]
-            logger.info("Nested delegation successful (session=%s)", session_id)
-            return token
-
-        if resp.status_code == 403:
-            error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            if error.get("error") == "delegation_depth_exceeded":
-                raise RuntimeError(
-                    f"Delegation chain too deep (max depth: {error.get('max_depth', MAX_DELEGATION_DEPTH)})"
-                )
-            raise RuntimeError(
-                f"Nested delegation forbidden: {error.get('error_description', resp.text)}"
-            )
-
-        raise RuntimeError(f"Nested delegation failed (HTTP {resp.status_code}): {resp.text}")
+        token = body["access_token"]
+        logger.info("Nested delegation successful (session=%s)", session_id)
+        return token
 
     # =========================================================================
     # Introspection
@@ -456,32 +391,7 @@ class DelegationChain:
             chain = DelegationChain.parse_actor_chain(delegated_token)
             # ["agent:orchestrator", "agent:search-tool", "agent:web-scraper"]
         """
-        import json
-        import base64
-
-        # Decode JWT payload without verification (introspection only)
-        parts = token.split(".")
-        if len(parts) < 2:
-            return []
-
-        # Add padding
-        payload_b64 = parts[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-
-        try:
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-        except Exception:
-            return []
-
-        actors: List[str] = []
-        act = payload.get("act")
-        while act:
-            sub = act.get("sub")
-            if sub:
-                actors.append(sub)
-            act = act.get("act")
-
-        return actors
+        return DelegationResource.parse_actor_chain(token)
 
     @staticmethod
     def get_subject(token: str) -> str | None:
@@ -493,21 +403,7 @@ class DelegationChain:
         Returns:
             The ``sub`` claim value, or ``None`` if decoding fails.
         """
-        import json
-        import base64
-
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-
-        payload_b64 = parts[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-
-        try:
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-            return payload.get("sub")
-        except Exception:
-            return None
+        return DelegationResource.get_subject(token)
 
     # =========================================================================
     # Revocation
@@ -533,25 +429,21 @@ class DelegationChain:
         logger.info("Revoking delegation (session=%s)", session_id)
 
         if user.refresh_token:
-            resp = requests.post(
-                f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1/oauth/revoke",
-                data={
-                    "token": user.refresh_token,
-                    "token_type_hint": "refresh_token",
-                    "client_id": self._agent.client_id,
-                    "client_secret": self._agent.client_secret,
-                },
-                timeout=30,
-                verify=self._verify_tls,
-            )
-            if resp.status_code == 200:
-                logger.info("Delegation revoked at server (session=%s)", session_id)
-            else:
+            try:
+                self._resource.revoke(
+                    user.refresh_token,
+                    token_type_hint="refresh_token",
+                    client_id=self._agent.client_id,
+                    client_secret=self._agent.client_secret,
+                )
+            except LumoAuthApiError as exc:
                 logger.warning(
-                    "Revocation request returned HTTP %d (session=%s)",
-                    resp.status_code,
+                    "Revocation request returned HTTP %s (session=%s)",
+                    exc.status_code,
                     session_id,
                 )
+            else:
+                logger.info("Delegation revoked at server (session=%s)", session_id)
 
         self._user_tokens.pop(session_id, None)
         self._delegated_tokens.pop(session_id, None)
@@ -576,6 +468,38 @@ class DelegationChain:
         return session_id in self._delegated_tokens
 
     # -- private helpers ------------------------------------------------------
+
+    def _exchange_tokens(
+        self,
+        *,
+        subject_token: str,
+        actor_token: str,
+        scopes: List[str] | None,
+        forbidden_message: str,
+        failed_prefix: str,
+    ) -> Dict[str, Any]:
+        """Run a token exchange, translating errors to the legacy messages."""
+        try:
+            return self._resource.exchange(subject_token, actor_token, scopes=scopes)
+        except LumoAuthPermissionDeniedError as exc:
+            error = exc.body if isinstance(exc.body, dict) else {}
+            if error.get("error") == "delegation_depth_exceeded":
+                raise LumoAuthPermissionDeniedError(
+                    f"Delegation chain too deep (max depth: "
+                    f"{error.get('max_depth', MAX_DELEGATION_DEPTH)})",
+                    body=exc.body,
+                ) from exc
+            raise LumoAuthPermissionDeniedError(
+                f"{forbidden_message}: {error.get('error_description', exc.message)}",
+                body=exc.body,
+            ) from exc
+        except LumoAuthApiError as exc:
+            raise LumoAuthApiError(
+                f"{failed_prefix} (HTTP {exc.status_code}): {exc.message}",
+                code=exc.code,
+                status_code=exc.status_code,
+                body=exc.body,
+            ) from exc
 
     def _ensure_user_token(self, session_id: str) -> _UserTokens:
         """Return the user tokens for *session_id*, refreshing if needed."""
@@ -603,28 +527,21 @@ class DelegationChain:
         """Refresh the user's access token."""
         logger.info("Refreshing user token (session=%s)", session_id)
 
-        resp = requests.post(
-            self._token_url(),
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": user.refresh_token,
-                "client_id": self._agent.client_id,
-                "client_secret": self._agent.client_secret,
-            },
-            timeout=30,
-            verify=self._verify_tls,
-        )
-
-        if resp.status_code != 200:
+        try:
+            body = self._resource.refresh_user_token(
+                user.refresh_token or "",
+                client_id=self._agent.client_id,
+                client_secret=self._agent.client_secret,
+            )
+        except LumoAuthApiError as exc:
             logger.error(
-                "User token refresh failed: HTTP %d — %s (session=%s)",
-                resp.status_code,
-                resp.text,
+                "User token refresh failed: HTTP %s — %s (session=%s)",
+                exc.status_code,
+                exc,
                 session_id,
             )
             return
 
-        body = resp.json()
         self._user_tokens[session_id] = _UserTokens(
             access_token=body["access_token"],
             refresh_token=body.get("refresh_token", user.refresh_token),

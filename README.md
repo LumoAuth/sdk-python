@@ -1,7 +1,8 @@
 # lumoauth
 
-Python SDK for [LumoAuth](https://lumoauth.dev) agent authentication, capability
-management, AAuth cryptographic identity, and Just-in-Time (JIT) permissions.
+Python SDK for [LumoAuth](https://lumoauth.dev) — authorization (RBAC /
+Zanzibar / ABAC), agent authentication and capability management, AAuth
+cryptographic identity, and Just-in-Time (JIT) permissions.
 
 ## Installation
 
@@ -13,6 +14,12 @@ For AAuth protocol support (Ed25519 signing) install the optional `aauth` extra:
 
 ```bash
 pip install lumoauth[aauth]
+```
+
+For the generated full-surface API client behind `client.api`:
+
+```bash
+pip install "lumoauth[api]"
 ```
 
 Or install from a local checkout:
@@ -28,14 +35,64 @@ pip install -e "./path/to/lumoauth[aauth]" # core + AAuth
 | --- | --- | --- |
 | `LUMOAUTH_URL` | LumoAuth instance URL | `https://app.lumoauth.dev` |
 | `LUMOAUTH_ORG_ID` | Organization ID | *(required)* |
-| `AGENT_CLIENT_ID` | Agent OAuth client ID | *(required)* |
-| `AGENT_CLIENT_SECRET` | Agent OAuth client secret | *(required)* |
+| `LUMOAUTH_API_KEY` | API key for the `LumoAuth` client | — |
+| `AGENT_CLIENT_ID` | Agent OAuth client ID | *(required for agents)* |
+| `AGENT_CLIENT_SECRET` | Agent OAuth client secret | *(required for agents)* |
 
-All four can also be passed directly to the `LumoAuthAgent` constructor.
+All of these can also be passed directly to the `LumoAuth` / `LumoAuthAgent`
+constructors.
 
 ---
 
-## Quick start
+## Quick start — `LumoAuth` client
+
+`LumoAuth` is the general-purpose client. The curated resource namespaces
+cover the common surface; everything else is reachable through the generated
+client at `client.api`:
+
+```python
+from lumoauth import LumoAuth
+
+client = LumoAuth(api_key="lk_…", org_id="acme-corp")   # or env vars
+
+# RBAC
+if client.permissions.check("document.edit"):
+    ...
+results = client.permissions.check_bulk(["document.edit", "document.delete"])
+
+# Zanzibar (ReBAC)
+if client.zanzibar.is_viewer("document:readme", "user:bob"):
+    ...
+
+# ABAC
+decision = client.abac.check("document", "read", "doc-123")
+if decision["allowed"]:
+    ...
+
+# Escape hatch: full generated API client (pip install "lumoauth[api]")
+# client.api …
+```
+
+Namespaces: `client.auth`, `client.permissions`, `client.zanzibar`,
+`client.abac`, `client.agents`, `client.delegation`, `client.jit`,
+`client.approvals`, `client.mcp`, plus the `client.api` escape hatch.
+
+Errors are typed — every HTTP failure raises a subclass of `LumoAuthError`:
+
+```python
+from lumoauth import LumoAuthPermissionDeniedError, LumoAuthRateLimitError
+
+try:
+    client.permissions.check_detailed("document.edit")
+except LumoAuthRateLimitError as err:
+    time.sleep(err.retry_after or 1)
+except LumoAuthPermissionDeniedError as err:
+    print(err.status_code, err.code, err.body)
+```
+
+---
+
+## Quick start — agents
 
 ```python
 from lumoauth import LumoAuthAgent
@@ -635,6 +692,44 @@ with JITContext(agent) as jit:
 
 ## API reference
 
+### `LumoAuth`
+
+```python
+LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
+         timeout=30, skip_cert_validation=False)
+```
+
+Credentials: pass an `api_key` (sent as `X-API-Key`) **or** a
+`token_provider` callable returning a bearer token (wins when both are set).
+
+| Namespace | Methods |
+| --- | --- |
+| `client.auth` | `authorization_url(…)`, `exchange_code(code, redirect_uri, …)`, `refresh_token(…)`, `client_credentials(client_id, client_secret, scopes=None)`, `token_exchange(subject_token, …)`, `revoke(token, …)`, `userinfo(access_token=None)` |
+| `client.permissions` | `check(permission, context=None, *, user_id=None)`, `check_detailed`, `check_bulk`, `check_any`, `check_all`, `check_any_detailed`, `check_all_detailed`, `list()`, `list_slugs()` |
+| `client.zanzibar` | `check(object, relation, subject)`, `check_detailed`, `is_viewer`, `is_editor`, `is_owner`, `is_member`, `is_admin` |
+| `client.abac` | `check(resource_type, action, resource_id=None, context=None)`, `is_allowed`, `check_bulk(requests)`, `get_my_attributes()`, `set_user_attribute(user_id, slug, value)`, `get_resource_attributes(type, id)`, `set_resource_attribute(type, id, slug, value)`, `get_attribute_definitions(type=None)` |
+| `client.agents` | `ask(action, context=None)`, `is_allowed`, `me()`, `register(name, *, client_id, …)`, `info()`, `capabilities()`, `budget()` |
+| `client.delegation` | `consent_url(…)`, `exchange_code(…)`, `exchange(subject_token, actor_token, scopes=None)`, `refresh_user_token(…)`, `revoke(token, …)`, `parse_actor_chain(token)`, `get_subject(token)` |
+| `client.jit` | `create_task(…)`, `complete_task(task_id)`, `evaluate_task(task_id, …)`, `request(task_id, authorization_details, …)`, `get_status(request_id)`, `get_token(request_id)`, `pending()` |
+| `client.approvals` | `create(…)`, `get_status(token)`, `wait(token, …)`, `require(*, task_id, reason, on_behalf_of, …)` |
+| `client.mcp` | `get_token(server_id, *, subject_token=None)` |
+| `client.api` | Generated OpenAPI client (lazy; requires `lumoauth[api]`) |
+
+### Errors
+
+All raised from `lumoauth`:
+
+`LumoAuthError` → `LumoAuthApiError` (`.status_code`, `.body`) →
+`LumoAuthAuthenticationError` (401) / `LumoAuthPermissionDeniedError` (403) /
+`LumoAuthNotFoundError` (404) / `LumoAuthRateLimitError` (429, `.retry_after`);
+plus `LumoAuthValidationError` (`.issues`), `LumoAuthConfigError`,
+`LumoAuthNetworkError`, `LumoAuthApprovalDeniedError`,
+`LumoAuthApprovalTimeoutError`, `LumoAuthBudgetExceededError`.
+
+For backwards compatibility `LumoAuthApiError` also subclasses
+`RuntimeError`, and `LumoAuthConfigError` / `LumoAuthValidationError` also
+subclass `ValueError`.
+
 ### `LumoAuthAgent`
 
 | Method | Description |
@@ -650,6 +745,8 @@ with JITContext(agent) as jit:
 | `get_identity()` | Agent self-inspection (`GET /agents/me`) |
 | `api_request(method, endpoint, …)` | Authenticated HTTP request |
 | `get_mcp_token(mcp_server_id)` | RFC 8693 token exchange for MCP servers |
+| `register(name, …)` | Register/update the agent record |
+| `.jit` / `.delegation` / `.mcp` / `.approvals` | Raw resource namespaces (same objects as on `LumoAuth`) |
 
 ### `AAuthClient`
 
@@ -684,6 +781,24 @@ agent lacks the named capability.
 ---
 
 ## Changelog
+
+### 1.0.0
+
+- New `LumoAuth` client with resource namespaces (`auth`, `permissions`,
+  `zanzibar`, `abac`, `agents`, `delegation`, `jit`, `approvals`, `mcp`) and a
+  lazy `client.api` escape hatch to the generated OpenAPI client
+  (`pip install "lumoauth[api]"`).
+- Typed error taxonomy (`LumoAuthError` / `LumoAuthApiError` /
+  `LumoAuthAuthenticationError` / …) replacing bare `ValueError` /
+  `RuntimeError`.  The new classes subclass the builtins they replaced, so
+  existing `except` clauses keep working.
+- All endpoint paths centralized in `lumoauth._routes.ROUTES` with an
+  OpenAPI drift test.
+- `LumoAuthAgent` moved to `lumoauth.agent` (importing it from
+  `lumoauth.client` or `lumoauth` still works) and is now a thin layer over
+  `LumoAuth`; every existing method keeps its name, signature, and behavior.
+- `DelegationChain` and `JITContext` keep their ergonomic surfaces but
+  delegate to the shared resources internally.
 
 ### 0.2.0
 

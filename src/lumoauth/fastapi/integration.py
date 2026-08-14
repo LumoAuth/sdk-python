@@ -6,11 +6,14 @@ import base64
 import hashlib
 import os
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlencode
 
-import requests
+from lumoauth._http import HttpClient
+from lumoauth._routes import format_path
+from lumoauth.errors import LumoAuthApiError
+from lumoauth.resources.auth import AuthResource
 
 try:
     from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -67,20 +70,36 @@ class LumoAuthFastAPI:
     post_login_redirect: str = "/"
     post_logout_redirect: str = "/"
     request_timeout_seconds: float = 10.0
+    _auth: Optional[AuthResource] = field(default=None, repr=False, compare=False)
+
+    # ---- Resource wiring ------------------------------------------------
+
+    def auth_resource(self) -> AuthResource:
+        """The OAuth resource all HTTP goes through (lazily constructed)."""
+        if self._auth is None:
+            self._auth = AuthResource(
+                HttpClient(
+                    self.base_url.rstrip("/"),
+                    org_id=self.organization,
+                    timeout=self.request_timeout_seconds,
+                )
+            )
+        return self._auth
 
     # ---- URL helpers ----------------------------------------------------
 
-    def _api_base(self) -> str:
-        return f"{self.base_url.rstrip('/')}/orgs/{self.organization}/api/v1"
+    def _route_url(self, route: str) -> str:
+        _, path = format_path(route, org_id=self.organization)
+        return f"{self.base_url.rstrip('/')}{path}"
 
     def authorize_url(self) -> str:
-        return f"{self._api_base()}/oauth/authorize"
+        return self._route_url("oauth.authorize")
 
     def token_url(self) -> str:
-        return f"{self._api_base()}/oauth/token"
+        return self._route_url("oauth.token")
 
     def userinfo_url(self) -> str:
-        return f"{self._api_base()}/oauth/userinfo"
+        return self._route_url("oauth.userinfo")
 
     # ---- PKCE -----------------------------------------------------------
 
@@ -99,46 +118,29 @@ class LumoAuthFastAPI:
     def exchange_code(
         self, code: str, code_verifier: str, redirect_uri: str
     ) -> dict[str, Any]:
-        body = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "client_id": self.client_id,
-            "code_verifier": code_verifier,
-        }
-        if self.client_secret:
-            body["client_secret"] = self.client_secret
-
-        resp = requests.post(
-            self.token_url(),
-            data=body,
-            timeout=self.request_timeout_seconds,
-            headers={"Accept": "application/json"},
-        )
-        if resp.status_code != 200:
-            try:
-                err = resp.json()
-            except ValueError:
-                err = {}
+        try:
+            return self.auth_resource().exchange_code(
+                code,
+                redirect_uri,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                code_verifier=code_verifier,
+            )
+        except LumoAuthApiError as exc:
+            err = exc.body if isinstance(exc.body, dict) else {}
             raise HTTPException(
                 status_code=502,
                 detail={
                     "error": err.get("error", "token_exchange_failed"),
                     "error_description": err.get(
-                        "error_description", f"HTTP {resp.status_code} from token endpoint"
+                        "error_description",
+                        f"HTTP {exc.status_code} from token endpoint",
                     ),
                 },
-            )
-        return resp.json()
+            ) from exc
 
     def fetch_userinfo(self, access_token: str) -> dict[str, Any]:
-        resp = requests.get(
-            self.userinfo_url(),
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=self.request_timeout_seconds,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self.auth_resource().userinfo(access_token)
 
 
 # ─── Dependencies ──────────────────────────────────────────────────────────

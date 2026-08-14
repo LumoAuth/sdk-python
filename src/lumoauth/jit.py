@@ -10,6 +10,11 @@ from typing import Any, Protocol, runtime_checkable
 
 import requests
 
+from lumoauth._http import HttpClient
+from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError
+from lumoauth.resources.auth import AuthResource
+from lumoauth.resources.jit import JitResource
+
 logger = logging.getLogger("lumoauth.jit")
 
 __all__ = ["JITContext"]
@@ -64,7 +69,7 @@ class JITContext:
     """
 
     # Maximum TTL the server will honour (15 min).
-    MAX_TTL: int = 900
+    MAX_TTL: int = JitResource.MAX_TTL
 
     def __init__(
         self,
@@ -87,6 +92,17 @@ class JITContext:
         self.caep_session_id: str | None = None
         self._verify_tls: bool = getattr(agent, "_verify_tls", True)
 
+        # JIT calls always use the current bearer (delegated wins), which
+        # the token provider resolves per request.
+        self._http = HttpClient(
+            agent.base_url,
+            org_id=agent.org_id,
+            token_provider=self._bearer,
+            verify_tls=self._verify_tls,
+        )
+        self._resource = JitResource(self._http)
+        self._auth = AuthResource(self._http)
+
     # -- context manager ------------------------------------------------------
 
     def __enter__(self) -> JITContext:
@@ -100,14 +116,13 @@ class JITContext:
     def _bearer(self) -> str:
         token = self._delegated_token or self._agent.access_token
         if not token:
-            raise RuntimeError("No access token available — authenticate first.")
+            raise LumoAuthConfigError(
+                "No access token available — authenticate first."
+            )
         return token
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._bearer()}"}
-
-    def _api(self, path: str) -> str:
-        return f"{self._agent.base_url}/orgs/{self._agent.org_id}/api/v1{path}"
 
     # =========================================================================
     # Delegation (on-behalf-of)
@@ -127,24 +142,15 @@ class JITContext:
         """
         logger.info("Exchanging tokens for on-behalf-of delegation")
 
-        resp = requests.post(
-            self._api("/oauth/token"),
-            data={
-                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-                "subject_token": user_token,
-                "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                "actor_token": self._agent.access_token,
-                "actor_token_type": "urn:ietf:params:oauth:token-type:access_token",
-            },
-            timeout=30,
-            verify=self._verify_tls,
-        )
-
-        if resp.status_code != 200:
-            logger.error("Delegation failed: HTTP %d — %s", resp.status_code, resp.text)
+        try:
+            body = self._auth.token_exchange(
+                user_token, actor_token=self._agent.access_token or ""
+            )
+        except LumoAuthApiError as exc:
+            logger.error("Delegation failed: HTTP %s — %s", exc.status_code, exc)
             return False
 
-        self._delegated_token = resp.json()["access_token"]
+        self._delegated_token = body["access_token"]
         logger.info("Delegation successful — agent can now act on behalf of user")
         return True
 
@@ -169,24 +175,9 @@ class JITContext:
         Returns:
             The ``task_id`` string.
         """
-        body: dict[str, Any] = {}
-        if name:
-            body["name"] = name
-        if task_type:
-            body["type"] = task_type
-        if on_behalf_of:
-            body["on_behalf_of"] = on_behalf_of
-
-        resp = requests.post(
-            self._api("/jit/task"),
-            headers=self._headers(),
-            json=body,
-            timeout=30,
-            verify=self._verify_tls,
+        data = self._resource.create_task(
+            name=name, task_type=task_type, on_behalf_of=on_behalf_of
         )
-        resp.raise_for_status()
-
-        data = resp.json()
         self.task_id = data["task_id"]
         self.caep_session_id = data.get("caep_session_id")
         logger.info(
@@ -207,18 +198,12 @@ class JITContext:
 
         logger.info("Completing task %s", self.task_id)
         try:
-            resp = requests.post(
-                self._api(f"/jit/task/{self.task_id}/complete"),
-                headers=self._headers(),
-                timeout=30,
-                verify=self._verify_tls,
-            )
-            ok = resp.status_code == 200
-            if ok:
-                logger.info("Task %s completed — all JIT tokens revoked", self.task_id)
-            else:
-                logger.warning("Task completion returned HTTP %d", resp.status_code)
-            return ok
+            self._resource.complete_task(self.task_id)
+            logger.info("Task %s completed — all JIT tokens revoked", self.task_id)
+            return True
+        except LumoAuthApiError as exc:
+            logger.warning("Task completion returned HTTP %s", exc.status_code)
+            return False
         finally:
             self.task_id = None
             self.caep_session_id = None
@@ -260,25 +245,14 @@ class JITContext:
             ``risk_level``, and ``token_url`` (when approved).
         """
         if not self.task_id:
-            raise RuntimeError("No active task — call create_task() first.")
+            raise LumoAuthConfigError("No active task — call create_task() first.")
 
-        body: dict[str, Any] = {
-            "task_id": self.task_id,
-            "authorization_details": authorization_details,
-            "requested_ttl": min(ttl, self.MAX_TTL),
-        }
-        if justification:
-            body["justification"] = justification
-
-        resp = requests.post(
-            self._api("/jit/request"),
-            headers=self._headers(),
-            json=body,
-            timeout=30,
-            verify=self._verify_tls,
+        result = self._resource.request(
+            self.task_id,
+            authorization_details,
+            justification=justification,
+            ttl=ttl,
         )
-        resp.raise_for_status()
-        result = resp.json()
 
         logger.info(
             "JIT request %s — status=%s risk=%s",
@@ -304,16 +278,7 @@ class JITContext:
         logger.info("Waiting for HITL approval (timeout=%ds)…", timeout)
         while time.time() < deadline:
             time.sleep(interval)
-            resp = requests.get(
-                f"{self._agent.base_url}{status_url}"
-                if not status_url.startswith("http")
-                else status_url,
-                headers=self._headers(),
-                timeout=30,
-                verify=self._verify_tls,
-            )
-            resp.raise_for_status()
-            result = resp.json()
+            result = self._http.request("GET", status_url)
             if result["status"] != "pending":
                 logger.info("HITL resolved: %s", result["status"])
                 return result
@@ -330,14 +295,7 @@ class JITContext:
         Returns:
             JIT access token string.
         """
-        resp = requests.post(
-            self._api(f"/jit/request/{request_id}/token"),
-            headers=self._headers(),
-            timeout=30,
-            verify=self._verify_tls,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = self._resource.get_token(request_id)
         logger.info(
             "JIT token issued (expires_in=%ds, request=%s)",
             data.get("expires_in", 0),
@@ -367,13 +325,13 @@ class JITContext:
             data: JSON body for POST/PUT.
             timeout: HTTP timeout.
         """
-        return requests.request(
+        return self._http.request(
             method,
             url,
-            headers={"Authorization": f"Bearer {jit_token}"},
             json=data,
             timeout=timeout,
-            verify=self._verify_tls,
+            headers={"Authorization": f"Bearer {jit_token}"},
+            raw=True,
         )
 
     # =========================================================================
@@ -388,18 +346,11 @@ class JITContext:
             ``status``, ``risk_level``, ``authorization_details``, etc.
 
         Raises:
-            RuntimeError: If the request fails.
+            LumoAuthApiError: If the request fails.
         """
-        resp = requests.get(
-            self._api("/jit/pending"),
-            headers=self._headers(),
-            timeout=30,
-            verify=self._verify_tls,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        logger.info("Listed %d pending JIT requests", len(data.get("requests", [])))
-        return data.get("requests", data if isinstance(data, list) else [])
+        pending = self._resource.pending()
+        logger.info("Listed %d pending JIT requests", len(pending))
+        return pending
 
     def evaluate_task(
         self,
@@ -424,25 +375,14 @@ class JITContext:
             Server response dict.
 
         Raises:
-            RuntimeError: If no task is active or the request fails.
+            LumoAuthConfigError: If no task is active.
+            LumoAuthApiError: If the request fails.
         """
         tid = task_id or self.task_id
         if not tid:
-            raise RuntimeError("No active task — call create_task() first.")
+            raise LumoAuthConfigError("No active task — call create_task() first.")
 
-        body: dict[str, Any] = {"result": result}
-        if notes:
-            body["notes"] = notes
-
-        resp = requests.post(
-            self._api(f"/jit/task/{tid}/evaluate"),
-            headers=self._headers(),
-            json=body,
-            timeout=30,
-            verify=self._verify_tls,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = self._resource.evaluate_task(tid, result=result, notes=notes)
         logger.info("Task %s evaluated as '%s'", tid, result)
         return data
 
@@ -470,13 +410,13 @@ class JITContext:
             timeout: HTTP timeout.
         """
         # First attempt with the base bearer token
-        resp = requests.request(
+        resp = self._http.request(
             method,
             url,
-            headers=self._headers(),
             json=data,
             timeout=timeout,
-            verify=self._verify_tls,
+            headers=self._headers(),
+            raw=True,
         )
 
         if resp.status_code != 403:

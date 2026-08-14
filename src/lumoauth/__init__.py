@@ -1,6 +1,16 @@
-"""LumoAuth Agent SDK — authenticate AI agents via LumoAuth.
+"""LumoAuth Python SDK — authenticate apps and AI agents via LumoAuth.
 
-Quick start::
+General-purpose client (RBAC / ReBAC / ABAC / agents / JIT / delegation)::
+
+    from lumoauth import LumoAuth
+
+    client = LumoAuth(api_key="lk_…", org_id="acme-corp")
+    if client.permissions.check("document.edit"):
+        ...
+    allowed = client.zanzibar.is_viewer("document:readme", "user:bob")
+    decision = client.abac.check("document", "read", "doc-123")
+
+Agent quick start::
 
     from lumoauth import LumoAuthAgent
 
@@ -30,19 +40,50 @@ JIT permissions (ephemeral tasks + RFC 9396)::
             token = jit.get_token(result["request_id"])
 """
 
-from lumoauth.client import LumoAuthAgent
+from lumoauth.aauth import AAuthClient
+from lumoauth.agent import LumoAuthAgent
+from lumoauth.approval import ApprovalResult, require_approval
+from lumoauth.client import LumoAuth
 from lumoauth.decorators import require_capability
 from lumoauth.delegation import DelegationChain
+from lumoauth.errors import (
+    LumoAuthApiError,
+    LumoAuthApprovalDeniedError,
+    LumoAuthApprovalTimeoutError,
+    LumoAuthAuthenticationError,
+    LumoAuthBudgetExceededError,
+    LumoAuthConfigError,
+    LumoAuthError,
+    LumoAuthNetworkError,
+    LumoAuthNotFoundError,
+    LumoAuthPermissionDeniedError,
+    LumoAuthRateLimitError,
+    LumoAuthValidationError,
+)
 from lumoauth.jit import JITContext
-from lumoauth.aauth import AAuthClient
-from lumoauth.approval import require_approval, ApprovalResult
 
 __all__ = [
+    # Clients
+    "LumoAuth",
     "LumoAuthAgent",
     "DelegationChain",
     "JITContext",
     "AAuthClient",
+    # Helpers
     "require_capability",
     "require_approval",
     "ApprovalResult",
+    # Errors
+    "LumoAuthError",
+    "LumoAuthApiError",
+    "LumoAuthAuthenticationError",
+    "LumoAuthPermissionDeniedError",
+    "LumoAuthNotFoundError",
+    "LumoAuthRateLimitError",
+    "LumoAuthValidationError",
+    "LumoAuthConfigError",
+    "LumoAuthNetworkError",
+    "LumoAuthApprovalDeniedError",
+    "LumoAuthApprovalTimeoutError",
+    "LumoAuthBudgetExceededError",
 ]
