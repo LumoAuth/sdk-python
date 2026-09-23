@@ -50,6 +50,7 @@ ROUTES: Dict[str, Tuple[str, str]] = {
     "authz.permissions": ("GET", "/api/v1/authz/permissions"),
     # ── Zanzibar (ReBAC) ──────────────────────────────────────────────
     "authz.zanzibar.check": ("POST", "/api/v1/authz/zanzibar/check"),
+    "authz.zanzibar.expand": ("POST", "/api/v1/authz/zanzibar/expand"),
     # ── ABAC ──────────────────────────────────────────────────────────
     "abac.check": ("POST", _ORG + "/abac/check"),
     "abac.check_bulk": ("POST", _ORG + "/abac/check-bulk"),

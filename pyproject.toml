@@ -41,6 +41,8 @@ fastapi = [
 ]
 dev = [
     "pytest>=7.0",
+    # AAuth tests exercise Ed25519 signing; without this they are skipped.
+    "cryptography>=41.0",
 ]
 
 [project.urls]
@@ -49,6 +51,12 @@ Repository = "https://github.com/lumoauth/python"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lumoauth"]
+
+# Local development: resolve the generated client from the sibling
+# api-clients/python checkout instead of a package index (it is not published).
+# Only consulted by `uv`; plain pip users get the [api] extra from PyPI.
+[tool.uv.sources]
+lumoauth-api-client = { path = "../api-clients/python", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

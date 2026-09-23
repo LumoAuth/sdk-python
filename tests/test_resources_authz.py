@@ -127,6 +127,46 @@ def test_zanzibar_sugar_helpers(client, fake_session):
     assert relations == ["viewer", "editor", "owner", "member", "admin"]
 
 
+EXPAND_TREE = {
+    "type": "union",
+    "object": "document:1",
+    "relation": "viewer",
+    "children": [
+        {
+            "type": "leaf",
+            "object": "document:1",
+            "relation": "viewer",
+            "subjects": ["user:alice", "team:eng#member"],
+        }
+    ],
+}
+
+
+def test_zanzibar_expand(client, fake_session):
+    fake_session.queue(FakeResponse(200, {"tree": EXPAND_TREE}))
+    tree = client.zanzibar.expand("document:1", "viewer")
+
+    method, url, kwargs = fake_session.last
+    assert (method, url) == ("POST", f"{BASE}/api/v1/authz/zanzibar/expand")
+    # expand takes no subject — sending one would be a different endpoint.
+    assert kwargs["json"] == {"object": "document:1", "relation": "viewer"}
+    assert tree["type"] == "union"
+    assert tree["children"][0]["subjects"] == ["user:alice", "team:eng#member"]
+
+
+def test_zanzibar_expand_validates_object_and_relation(client):
+    with pytest.raises(LumoAuthValidationError):
+        client.zanzibar.expand("not-namespaced", "viewer")
+    with pytest.raises(LumoAuthValidationError):
+        client.zanzibar.expand("doc:1", "")
+
+
+def test_zanzibar_expand_rejects_a_response_without_a_tree(client, fake_session):
+    fake_session.queue(FakeResponse(200, {"allowed": True}))
+    with pytest.raises(LumoAuthValidationError):
+        client.zanzibar.expand("doc:1", "viewer")
+
+
 def test_zanzibar_validates_tuple_format(client):
     with pytest.raises(LumoAuthValidationError):
         client.zanzibar.check("not-namespaced", "viewer", "user:alice")

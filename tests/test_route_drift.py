@@ -11,6 +11,7 @@ Routes the server serves but the spec does not document are tracked in
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -18,10 +19,13 @@ import pytest
 
 from lumoauth._routes import ROUTES
 
+# Resolved relative to this file (tests/ -> sdk-python/ -> monorepo root) so the
+# suite works from any checkout location; LUMO_OPENAPI_PATH overrides.
+_MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 SPEC_CANDIDATES = [
-    Path("/Users/rch/src/lumo/server/openapi.json"),
-    Path(__file__).resolve().parents[2] / "server" / "openapi.json",
-    Path(__file__).resolve().parents[2] / "api-clients" / "openapi.json",
+    *([Path(os.environ["LUMO_OPENAPI_PATH"])] if os.environ.get("LUMO_OPENAPI_PATH") else []),
+    _MONOREPO_ROOT / "server" / "openapi.json",
+    _MONOREPO_ROOT / "api-clients" / "openapi.json",
 ]
 
 # Routes whose exact (method, path) is NOT present in the OpenAPI spec but is
@@ -58,7 +62,10 @@ SPEC_PAIRS, SPEC_FILE = _load_spec_pairs()
 
 pytestmark = pytest.mark.skipif(
     SPEC_PAIRS is None,
-    reason="openapi.json not found (looked in server/ and api-clients/)",
+    reason=(
+        "openapi.json not found (looked in $LUMO_OPENAPI_PATH, "
+        f"{_MONOREPO_ROOT / 'server'} and {_MONOREPO_ROOT / 'api-clients'})"
+    ),
 )
 
 

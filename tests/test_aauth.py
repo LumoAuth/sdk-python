@@ -14,7 +14,12 @@ from unittest import mock
 
 import pytest
 
-from lumoauth.aauth import AAuthClient
+pytest.importorskip(
+    "cryptography",
+    reason="AAuth tests need the 'cryptography' package (pip install -e '.[dev]')",
+)
+
+from lumoauth.aauth import AAuthClient  # noqa: E402
 
 BASE_URL = "https://auth.example.com"
 ORG_ID = "acme-corp"
