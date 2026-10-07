@@ -33,7 +33,7 @@ def make_client(**kwargs) -> tuple[HttpClient, FakeSession]:
 @pytest.mark.parametrize(
     "status,exc_type,default_code",
     [
-        (401, LumoAuthAuthenticationError, "AUTH_ERROR"),
+        (401, LumoAuthAuthenticationError, "AUTHENTICATION_ERROR"),
         (403, LumoAuthPermissionDeniedError, "PERMISSION_DENIED"),
         (404, LumoAuthNotFoundError, "NOT_FOUND"),
         (429, LumoAuthRateLimitError, "RATE_LIMITED"),

@@ -4,7 +4,7 @@ Mirrors the JS SDK's error hierarchy (same names and codes):
 
     LumoAuthError
     ├── LumoAuthApiError            (any non-2xx HTTP response)
-    │   ├── LumoAuthAuthenticationError   (401, code AUTH_ERROR)
+    │   ├── LumoAuthAuthenticationError   (401, code AUTHENTICATION_ERROR)
     │   ├── LumoAuthPermissionDeniedError (403, code PERMISSION_DENIED)
     │   ├── LumoAuthNotFoundError         (404, code NOT_FOUND)
     │   └── LumoAuthRateLimitError        (429, code RATE_LIMITED)
@@ -75,7 +75,7 @@ class LumoAuthAuthenticationError(LumoAuthApiError):
     def __init__(
         self,
         message: str = "Authentication failed — check your credentials.",
-        code: str = "AUTH_ERROR",
+        code: str = "AUTHENTICATION_ERROR",
         status_code: int = 401,
         body: Any = None,
     ) -> None:
