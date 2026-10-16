@@ -659,7 +659,7 @@ LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
 
 | Namespace | Methods |
 |---|---|
-| `client.auth` | `authorization_url(…)`, `exchange_code(code, redirect_uri, …)`, `refresh_token(…)`, `client_credentials(client_id, client_secret, scopes=None)`, `token_exchange(subject_token, …)`, `revoke(token, …)`, `userinfo(access_token=None)` |
+| `client.auth` | `authorization_url(…)`, `exchange_code(code, redirect_uri, …)`, `refresh_token(…)`, `client_credentials(client_id, client_secret, scopes=None)`, `token_exchange(subject_token, …, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE)`, `revoke(token, …)`, `userinfo(access_token=None)`. The RFC 8693 types are the module constants `ACCESS_TOKEN_TYPE` (default), `JWT_TOKEN_TYPE` (at+jwt access token or external workload JWT), `ID_TOKEN_TYPE` (OpenID Connect ID token) and `REFRESH_TOKEN_TYPE`; the server refuses a token that does not match its declared type. |
 | `client.permissions` | `check(permission, context=None, *, user_id=None)`, `check_detailed`, `check_bulk`, `check_any`, `check_all`, `check_any_detailed`, `check_all_detailed`, `list()`, `list_slugs()` |
 | `client.zanzibar` | `check(object, relation, subject)`, `check_detailed`, `is_viewer`, `is_editor`, `is_owner`, `is_member`, `is_admin` |
 | `client.abac` | `check(resource_type, action, resource_id=None, context=None)`, `is_allowed`, `check_bulk(requests)`, `get_my_attributes()`, `set_user_attribute(user_id, slug, value)`, `get_resource_attributes(type, id)`, `set_resource_attribute(type, id, slug, value)`, `get_attribute_definitions(type=None)` |

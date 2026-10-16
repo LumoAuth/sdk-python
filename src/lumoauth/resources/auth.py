@@ -14,7 +14,18 @@ __all__ = ["AuthResource"]
 
 # RFC 8693 constants
 TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+# RFC 8693 subject_token_type / actor_token_type values (sdk-contract/token-types.json).
+# The server checks the token against the declared type and answers a mismatch
+# with invalid_grant: ACCESS_TOKEN_TYPE is an opaque or at+jwt access token (the
+# default); JWT_TOKEN_TYPE an at+jwt access token or an external workload identity
+# token; ID_TOKEN_TYPE an OpenID Connect ID token issued to the exchanging client;
+# REFRESH_TOKEN_TYPE a refresh token issued to the exchanging client. JIT
+# permission tokens, logout tokens and other special-purpose JWTs are never
+# accepted under any type.
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
+ID_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id_token"
+REFRESH_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:refresh_token"
 
 
 class AuthResource:
@@ -127,16 +138,24 @@ class AuthResource:
         actor_token: Optional[str] = None,
         audience: Optional[str] = None,
         scopes: Optional[List[str]] = None,
+        subject_token_type: str = ACCESS_TOKEN_TYPE,
+        actor_token_type: str = ACCESS_TOKEN_TYPE,
     ) -> Dict[str, Any]:
-        """RFC 8693 token exchange (delegation, MCP audience scoping)."""
+        """RFC 8693 token exchange (delegation, MCP audience scoping).
+
+        ``subject_token_type`` / ``actor_token_type`` declare what kind of token
+        is being exchanged (``ACCESS_TOKEN_TYPE``, ``JWT_TOKEN_TYPE``,
+        ``ID_TOKEN_TYPE`` or ``REFRESH_TOKEN_TYPE``); the server refuses a token
+        that does not match its declared type.
+        """
         data: Dict[str, str] = {
             "grant_type": TOKEN_EXCHANGE_GRANT,
             "subject_token": subject_token,
-            "subject_token_type": ACCESS_TOKEN_TYPE,
+            "subject_token_type": subject_token_type,
         }
         if actor_token:
             data["actor_token"] = actor_token
-            data["actor_token_type"] = ACCESS_TOKEN_TYPE
+            data["actor_token_type"] = actor_token_type
         if audience:
             data["audience"] = audience
         if scopes:

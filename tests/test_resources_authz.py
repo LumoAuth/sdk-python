@@ -271,3 +271,23 @@ def test_abac_requires_org_id(fake_session, monkeypatch):
     client = LumoAuth(base_url=BASE, api_key="lk_test")  # no org_id
     with pytest.raises(LumoAuthConfigError):
         client.abac.check("document", "read")
+
+
+# ── auth.token_exchange token types ───────────────────────────────────
+
+
+def test_token_exchange_declares_the_token_types(client, fake_session):
+    from lumoauth.resources.auth import ACCESS_TOKEN_TYPE, ID_TOKEN_TYPE
+
+    fake_session.queue(FakeResponse(200, {"access_token": "x"}), FakeResponse(200, {"access_token": "y"}))
+
+    client.auth.token_exchange("subject", actor_token="actor", audience="urn:mcp:x")
+    _, _, kwargs = fake_session.last
+    assert kwargs["data"]["subject_token_type"] == ACCESS_TOKEN_TYPE, "access_token is the default"
+    assert kwargs["data"]["actor_token_type"] == ACCESS_TOKEN_TYPE
+
+    # An ID token (or workload JWT) is declared as such; the actor default stays access_token.
+    client.auth.token_exchange("id-token", actor_token="actor", subject_token_type=ID_TOKEN_TYPE)
+    _, _, kwargs = fake_session.last
+    assert kwargs["data"]["subject_token_type"] == "urn:ietf:params:oauth:token-type:id_token"
+    assert kwargs["data"]["actor_token_type"] == "urn:ietf:params:oauth:token-type:access_token"

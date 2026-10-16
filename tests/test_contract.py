@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from lumoauth import errors
+from lumoauth.resources import auth as auth_resource
 from lumoauth._routes import ROUTES
 
 _CANDIDATES = [
@@ -79,3 +80,11 @@ def test_error_taxonomy_matches_the_contract() -> None:
         if spec["parent"]:
             assert isinstance(e, getattr(errors, spec["parent"])), f"{spec['name']} extends {spec['parent']}"
         assert isinstance(e, Exception)
+
+
+def test_token_exchange_types_match_the_contract() -> None:
+    types = _load("token-types.json")["types"]
+    for key, spec in types.items():
+        name = spec["names"]["python"]
+        assert hasattr(auth_resource, name), f"{key}: {name} missing from lumoauth.resources.auth"
+        assert getattr(auth_resource, name) == spec["urn"], f"{key}: {name}"
