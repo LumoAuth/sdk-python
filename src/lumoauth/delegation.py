@@ -227,6 +227,8 @@ class DelegationChain:
         self,
         session_id: str,
         scopes: List[str] | None = None,
+        *,
+        resource: Optional[str] = None,
     ) -> str:
         """Perform an RFC 8693 token exchange to get a delegated token.
 
@@ -238,6 +240,9 @@ class DelegationChain:
             session_id: Session whose user token to use as the subject.
             scopes: Optional scope reduction — must be a subset of the
                 scopes the user consented to.
+            resource: RFC 8707 resource indicator — the https URL of the
+                API the delegated token is for. It becomes its ``aud``;
+                without it the token is bound to this agent's id.
 
         Returns:
             The delegated access token string.
@@ -257,6 +262,7 @@ class DelegationChain:
             subject_token=user.access_token,
             actor_token=self._agent.access_token or "",
             scopes=scopes,
+            resource=resource,
             forbidden_message=(
                 "Token exchange forbidden — agent may lack 'delegate:on_behalf' capability"
             ),
@@ -325,6 +331,8 @@ class DelegationChain:
         session_id: str,
         sub_agent_token: str,
         scopes: List[str] | None = None,
+        *,
+        resource: Optional[str] = None,
     ) -> str:
         """Create a nested delegation token for a sub-agent.
 
@@ -340,6 +348,8 @@ class DelegationChain:
                 via its client-credentials flow).
             scopes: Optional scope reduction for the sub-agent (must be
                 a subset of the current delegation's scopes).
+            resource: RFC 8707 resource indicator for the sub-agent's
+                token (its ``aud``), as for :meth:`exchange`.
 
         Returns:
             A delegated access token for the sub-agent.
@@ -358,6 +368,7 @@ class DelegationChain:
             subject_token=our_token,
             actor_token=sub_agent_token,
             scopes=scopes,
+            resource=resource,
             forbidden_message="Nested delegation forbidden",
             failed_prefix="Nested delegation failed",
         )
@@ -475,12 +486,15 @@ class DelegationChain:
         subject_token: str,
         actor_token: str,
         scopes: List[str] | None,
+        resource: Optional[str],
         forbidden_message: str,
         failed_prefix: str,
     ) -> Dict[str, Any]:
         """Run a token exchange, translating errors to the legacy messages."""
         try:
-            return self._resource.exchange(subject_token, actor_token, scopes=scopes)
+            return self._resource.exchange(
+                subject_token, actor_token, scopes=scopes, resource=resource
+            )
         except LumoAuthPermissionDeniedError as exc:
             error = exc.body if isinstance(exc.body, dict) else {}
             if error.get("error") == "delegation_depth_exceeded":

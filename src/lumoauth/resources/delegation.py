@@ -82,14 +82,17 @@ class DelegationResource:
         subject_token: str,
         actor_token: str,
         scopes: Optional[List[str]] = None,
+        *,
+        resource: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Combine subject (user) + actor (agent) tokens into a delegated token.
 
         Returns the full token response; the delegated JWT carries an ``act``
-        claim recording the chain.
+        claim recording the chain. ``resource`` (RFC 8707 https URL) becomes
+        its ``aud``; without it the token is bound to the acting agent.
         """
         return self._auth.token_exchange(
-            subject_token, actor_token=actor_token, scopes=scopes
+            subject_token, actor_token=actor_token, scopes=scopes, resource=resource
         )
 
     def revoke(

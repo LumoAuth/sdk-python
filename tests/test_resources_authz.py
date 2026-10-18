@@ -291,3 +291,15 @@ def test_token_exchange_declares_the_token_types(client, fake_session):
     _, _, kwargs = fake_session.last
     assert kwargs["data"]["subject_token_type"] == "urn:ietf:params:oauth:token-type:id_token"
     assert kwargs["data"]["actor_token_type"] == "urn:ietf:params:oauth:token-type:access_token"
+
+
+def test_token_exchange_sends_the_resource_indicator(client, fake_session):
+    fake_session.queue(FakeResponse(200, {"access_token": "x"}), FakeResponse(200, {"access_token": "y"}))
+
+    client.auth.token_exchange("subject", actor_token="actor")
+    _, _, kwargs = fake_session.last
+    assert "resource" not in kwargs["data"], "no resource unless asked"
+
+    client.delegation.exchange("subject", "actor", resource="https://api.example.com")
+    _, _, kwargs = fake_session.last
+    assert kwargs["data"]["resource"] == "https://api.example.com"

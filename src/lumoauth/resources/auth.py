@@ -19,7 +19,9 @@ TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 # with invalid_grant: ACCESS_TOKEN_TYPE is an opaque or at+jwt access token (the
 # default); JWT_TOKEN_TYPE an at+jwt access token or an external workload identity
 # token; ID_TOKEN_TYPE an OpenID Connect ID token issued to the exchanging client;
-# REFRESH_TOKEN_TYPE a refresh token issued to the exchanging client. JIT
+# REFRESH_TOKEN_TYPE a refresh token issued to the exchanging client (refused as
+# the subject when an agent acts on a user's behalf, i.e. actor_token is an
+# agent access token: 400 invalid_request). JIT
 # permission tokens, logout tokens and other special-purpose JWTs are never
 # accepted under any type.
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
@@ -140,6 +142,7 @@ class AuthResource:
         scopes: Optional[List[str]] = None,
         subject_token_type: str = ACCESS_TOKEN_TYPE,
         actor_token_type: str = ACCESS_TOKEN_TYPE,
+        resource: Optional[str] = None,
     ) -> Dict[str, Any]:
         """RFC 8693 token exchange (delegation, MCP audience scoping).
 
@@ -147,6 +150,11 @@ class AuthResource:
         is being exchanged (``ACCESS_TOKEN_TYPE``, ``JWT_TOKEN_TYPE``,
         ``ID_TOKEN_TYPE`` or ``REFRESH_TOKEN_TYPE``); the server refuses a token
         that does not match its declared type.
+
+        ``resource`` (RFC 8707: the absolute https URL of the API) becomes the
+        issued token's ``aud``. Without it an agent on-behalf-of
+        token is bound to the acting agent's own id. ``audience`` is sent as the
+        RFC 8693 parameter but LumoAuth binds ``aud`` from ``resource`` only.
         """
         data: Dict[str, str] = {
             "grant_type": TOKEN_EXCHANGE_GRANT,
@@ -158,6 +166,8 @@ class AuthResource:
             data["actor_token_type"] = actor_token_type
         if audience:
             data["audience"] = audience
+        if resource:
+            data["resource"] = resource
         if scopes:
             data["scope"] = " ".join(scopes)
         return self._token_request(data)

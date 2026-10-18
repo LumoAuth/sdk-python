@@ -218,7 +218,9 @@ client.zanzibar.is_admin("org:acme", "user:alice")
 **ABAC** evaluates policies over user and resource attributes:
 
 ```python
-decision = client.abac.check("document", "read", "doc-123", context={"ip": "10.0.0.8"})
+# ip / userAgent / requestMethod / requestPath always describe the request
+# LumoAuth received; forward the end user's values under "pep" (policies read pep.ip).
+decision = client.abac.check("document", "read", "doc-123", context={"pep": {"ip": "10.0.0.8"}})
 if client.abac.is_allowed("document", "read", "doc-123"):
     ...
 
@@ -659,12 +661,12 @@ LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
 
 | Namespace | Methods |
 |---|---|
-| `client.auth` | `authorization_url(…)`, `exchange_code(code, redirect_uri, …)`, `refresh_token(…)`, `client_credentials(client_id, client_secret, scopes=None)`, `token_exchange(subject_token, …, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE)`, `revoke(token, …)`, `userinfo(access_token=None)`. The RFC 8693 types are the module constants `ACCESS_TOKEN_TYPE` (default), `JWT_TOKEN_TYPE` (at+jwt access token or external workload JWT), `ID_TOKEN_TYPE` (OpenID Connect ID token) and `REFRESH_TOKEN_TYPE`; the server refuses a token that does not match its declared type. |
+| `client.auth` | `authorization_url(…)`, `exchange_code(code, redirect_uri, …)`, `refresh_token(…)`, `client_credentials(client_id, client_secret, scopes=None)`, `token_exchange(subject_token, …, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE, resource=None)`, `revoke(token, …)`, `userinfo(access_token=None)`. The RFC 8693 types are the module constants `ACCESS_TOKEN_TYPE` (default), `JWT_TOKEN_TYPE` (at+jwt access token or external workload JWT), `ID_TOKEN_TYPE` (OpenID Connect ID token) and `REFRESH_TOKEN_TYPE` (not accepted as the subject when an agent acts on a user's behalf); the server refuses a token that does not match its declared type. `resource` (RFC 8707 https URL) becomes the issued token's `aud`; LumoAuth does not bind `aud` from `audience`. |
 | `client.permissions` | `check(permission, context=None, *, user_id=None)`, `check_detailed`, `check_bulk`, `check_any`, `check_all`, `check_any_detailed`, `check_all_detailed`, `list()`, `list_slugs()` |
 | `client.zanzibar` | `check(object, relation, subject)`, `check_detailed`, `is_viewer`, `is_editor`, `is_owner`, `is_member`, `is_admin` |
 | `client.abac` | `check(resource_type, action, resource_id=None, context=None)`, `is_allowed`, `check_bulk(requests)`, `get_my_attributes()`, `set_user_attribute(user_id, slug, value)`, `get_resource_attributes(type, id)`, `set_resource_attribute(type, id, slug, value)`, `get_attribute_definitions(type=None)` |
 | `client.agents` | `ask(action, context=None)`, `is_allowed`, `me()`, `register(name, *, client_id, …)`, `info()`, `capabilities()`, `budget()` |
-| `client.delegation` | `consent_url(…)`, `exchange_code(…)`, `exchange(subject_token, actor_token, scopes=None)`, `refresh_user_token(…)`, `revoke(token, …)`, `parse_actor_chain(token)`, `get_subject(token)` |
+| `client.delegation` | `consent_url(…)`, `exchange_code(…)`, `exchange(subject_token, actor_token, scopes=None, *, resource=None)`, `refresh_user_token(…)`, `revoke(token, …)`, `parse_actor_chain(token)`, `get_subject(token)` |
 | `client.jit` | `create_task(…)`, `complete_task(task_id)`, `evaluate_task(task_id, …)`, `request(task_id, authorization_details, …)`, `get_status(request_id)`, `get_token(request_id)`, `pending()` |
 | `client.approvals` | `create(…)`, `get_status(token)`, `wait(token, …)`, `require(*, task_id, reason, on_behalf_of, …)` |
 | `client.mcp` | `get_token(server_id, *, subject_token=None)` |
@@ -718,9 +720,9 @@ DelegationChain(agent, *, redirect_uri=None)
 | `get_consent_url(session_id, scopes=…)` | Build the user consent URL |
 | `handle_consent_callback(session_id, code)` | Redeem the authorization code |
 | `set_user_token(session_id, token)` | Use an existing user token |
-| `exchange(session_id, scopes=None)` | Obtain a delegated token |
+| `exchange(session_id, scopes=None, *, resource=None)` | Obtain a delegated token (`resource`: RFC 8707 URL, becomes its `aud`) |
 | `request(session_id, method, url, …)` | HTTP request with the delegated token |
-| `delegate_to_sub_agent(session_id, sub_agent_token, scopes=…)` | Nested delegation |
+| `delegate_to_sub_agent(session_id, sub_agent_token, scopes=…, *, resource=None)` | Nested delegation |
 | `revoke(session_id)` / `revoke_all()` | Revoke delegations |
 | `parse_actor_chain(token)` / `get_subject(token)` *(static)* | Inspect any delegated JWT |
 
