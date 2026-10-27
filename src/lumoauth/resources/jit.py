@@ -99,8 +99,19 @@ class JitResource:
         )
 
     def pending(self) -> List[Dict[str, Any]]:
-        """List pending HITL approval requests."""
-        data = self._http.call("jit.pending")
-        if isinstance(data, dict):
-            return data.get("requests", [])
-        return data if isinstance(data, list) else []
+        """List pending HITL approval requests.
+
+        This is a reviewer call: it needs a browser session or a user access
+        token with the ``jit:approve`` scope.
+        """
+        body = self._http.call("jit.pending")
+        if isinstance(body, dict):
+            # Server answers {pending_requests, count, data, pagination};
+            # ``data`` is the standard list envelope, ``pending_requests``
+            # the older name for the same list.
+            for key in ("data", "pending_requests", "requests"):
+                items = body.get(key)
+                if isinstance(items, list):
+                    return items
+            return []
+        return body if isinstance(body, list) else []

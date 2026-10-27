@@ -23,6 +23,11 @@ Example::
     if result.status != "approved":
         raise RuntimeError(f"action denied: {result.status} ({result.reason})")
     # Use result.token as auth header for the actual side-effecting call.
+
+When no push prompt can reach the user, ``require_approval`` raises
+:class:`~lumoauth.errors.LumoAuthApprovalNotDeliveredError` instead of
+polling. Its ``reason`` is ``"email_fallback_sent"`` (HTTP 202: the user got a
+plain email notice, or does not exist) or ``"no_enrolled_device"`` (HTTP 428).
 """
 
 from __future__ import annotations
@@ -32,14 +37,58 @@ from typing import Any, Dict, Literal, Mapping, Optional
 import time
 
 from lumoauth._routes import format_path
-from lumoauth.errors import LumoAuthConfigError, LumoAuthValidationError
+from lumoauth.errors import (
+    LumoAuthApprovalNotDeliveredError,
+    LumoAuthConfigError,
+    LumoAuthValidationError,
+)
 
 ApprovalImpact = Literal["low", "medium", "high", "critical"]
 ApprovalStatus = Literal["pending", "approved", "denied", "expired"]
 
+#: Status of a 202 answer to the create call: no push prompt was sent.
+EMAIL_FALLBACK_SENT = "email_fallback_sent"
+#: Error code of a 428 answer: no device, and the email notice failed.
+NO_ENROLLED_DEVICE = "no_enrolled_device"
+
+
+def is_not_delivered(created: Any) -> bool:
+    """True when a create response is the 202 ``email_fallback_sent`` answer."""
+    return isinstance(created, dict) and created.get("status") == EMAIL_FALLBACK_SENT
+
+
+def not_delivered_error(
+    reason: str, body: Any = None, status_code: Optional[int] = None
+) -> LumoAuthApprovalNotDeliveredError:
+    """Build the error for a 202 ``email_fallback_sent`` or a 428 answer."""
+    body_dict = body if isinstance(body, dict) else {}
+    message = body_dict.get("message")
+    if not isinstance(message, str) or not message:
+        message = (
+            "No push prompt was sent: the user has no enrolled device. "
+            "LumoAuth emailed them a notice instead."
+            if reason == EMAIL_FALLBACK_SENT
+            else "No push prompt was sent: the user has no enrolled device."
+        )
+    task_id = body_dict.get("task_id")
+    return LumoAuthApprovalNotDeliveredError(
+        message,
+        reason=reason,
+        task_id=task_id if isinstance(task_id, str) else None,
+        status_code=status_code,
+        body=body,
+    )
+
 
 @dataclass(frozen=True)
 class ApprovalResult:
+    """Outcome of a resolved (or timed-out) approval request.
+
+    ``approved_by`` is ``{"user_id": <int>}`` when the status is
+    ``"approved"`` and ``None`` otherwise. LumoAuth does not return the
+    approver's email.
+    """
+
     status: ApprovalStatus
     token: str
     task_id: str
@@ -89,9 +138,15 @@ def require_approval(
             "meta": dict(meta) if meta else None,
         },
     )
+    if create_resp.status_code == 428:
+        raise not_delivered_error(NO_ENROLLED_DEVICE, _json_or_none(create_resp), 428)
     create_resp.raise_for_status()
     created = create_resp.json()
-    token = created["approval_token"]
+    if create_resp.status_code == 202 or is_not_delivered(created):
+        raise not_delivered_error(EMAIL_FALLBACK_SENT, created, create_resp.status_code)
+    token = created.get("approval_token") if isinstance(created, dict) else None
+    if not token:
+        raise LumoAuthValidationError("approval response has no approval_token")
 
     deadline = time.monotonic() + timeout_s
     last: Dict[str, Any] = {"status": "pending"}
@@ -116,3 +171,10 @@ def require_approval(
         responded_at=last.get("responded_at"),
         approved_by=last.get("approved_by"),
     )
+
+
+def _json_or_none(resp: Any) -> Any:
+    try:
+        return resp.json()
+    except ValueError:
+        return None

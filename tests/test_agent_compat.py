@@ -248,7 +248,7 @@ def test_get_mcp_token_posts_rfc8693_exchange(agent, fake_session):
     authenticated(agent, fake_session)
     fake_session.queue(FakeResponse(200, {"access_token": "mcp-tok"}))
 
-    assert agent.get_mcp_token("urn:mcp:financial-data") == "mcp-tok"
+    assert agent.get_mcp_token("https://mcp.example.com/mcp") == "mcp-tok"
 
     method, url, kwargs = fake_session.last
     assert (method, url) == ("POST", f"{BASE}/orgs/{ORG}/api/v1/oauth/token")
@@ -256,14 +256,23 @@ def test_get_mcp_token_posts_rfc8693_exchange(agent, fake_session):
         "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
         "subject_token": "at-1",
         "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "audience": "urn:mcp:financial-data",
+        "audience": "https://mcp.example.com/mcp",
+        "resource": "https://mcp.example.com/mcp",
     }
 
 
 def test_get_mcp_token_returns_none_on_failure(agent, fake_session):
     authenticated(agent, fake_session)
     fake_session.queue(FakeResponse(403, {"error": "forbidden"}))
-    assert agent.get_mcp_token("urn:mcp:x") is None
+    assert agent.get_mcp_token("https://mcp.example.com/x") is None
+
+
+def test_get_mcp_token_rejects_a_urn_server_id(agent, fake_session):
+    from lumoauth.errors import LumoAuthValidationError
+
+    with pytest.raises(LumoAuthValidationError, match="https URL"):
+        agent.get_mcp_token("urn:mcp:financial-data")
+    assert fake_session.calls == []
 
 
 # ── namespaces ────────────────────────────────────────────────────────
@@ -316,7 +325,7 @@ def test_require_approval_flow(agent, fake_session, monkeypatch):
             "impact": "high",
             "reason": "Wire $1",
             "responded_at": "2026-08-14T00:00:00Z",
-            "approved_by": {"email": "ada@acme.com"},
+            "approved_by": {"user_id": 42},
         }),
     )
 
@@ -329,6 +338,7 @@ def test_require_approval_flow(agent, fake_session, monkeypatch):
     )
     assert result.status == "approved"
     assert result.token == "apv-1"
+    assert result.approved_by == {"user_id": 42}
 
     create = fake_session.calls[1]
     assert create[1] == f"{BASE}/orgs/{ORG}/api/v1/agents/me/approvals"

@@ -13,12 +13,17 @@ __all__ = ["AbacResource"]
 class AbacResource:
     """Context-aware authorization from user/resource/environment attributes.
 
+    A user access token needs the ``abac:read`` scope for checks and attribute
+    reads, and ``abac:write`` to set attributes. Organization API keys are not
+    accepted on the ABAC routes.
+
     ABAC is mounted org-scoped on the server (``/orgs/{org_id}/api/v1/abac/…``)
     so the client must be constructed with an ``org_id``.
 
     Note: the server's ABAC request bodies use camelCase keys
     (``resourceType``, ``resourceId``); this resource accepts snake_case
-    Python arguments and translates.
+    Python arguments and translates. The ``context`` argument is sent as the
+    request's ``environment``, which is the field that LumoAuth evaluates.
     """
 
     def __init__(self, http: HttpClient) -> None:
@@ -35,8 +40,15 @@ class AbacResource:
     ) -> Dict[str, Any]:
         """Evaluate ABAC policies for a single resource/action.
 
+        ``context`` holds environment attributes for the policies. It is sent
+        as ``environment``. LumoAuth always sets ``ip``, ``userAgent``,
+        ``requestMethod`` and ``requestPath`` from the request that it
+        received; a value that you pass under one of those names is kept
+        under ``pep`` instead.
+
         Returns the full decision dict (``allowed``, ``reason``,
-        ``matchedPolicies``, …).
+        ``matchedPolicies``, …). A caller without the ``policies.view``
+        permission gets only ``id`` and ``name`` for each matched policy.
         """
         if not resource_type:
             raise LumoAuthValidationError("resource_type is required.")
@@ -46,7 +58,7 @@ class AbacResource:
         if resource_id is not None:
             body["resourceId"] = resource_id
         if context:
-            body["context"] = dict(context)
+            body["environment"] = dict(context)
         return self._http.call("abac.check", json=body)
 
     def is_allowed(
@@ -59,26 +71,60 @@ class AbacResource:
         """Shorthand for :meth:`check` returning just ``True``/``False``."""
         return bool(self.check(resource_type, action, resource_id, context).get("allowed", False))
 
-    def check_bulk(self, requests: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    def check_bulk(
+        self,
+        requests: List[Mapping[str, Any]],
+        environment: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Check multiple resource/action pairs in one request (max 100).
 
         Each item may use snake_case (``resource_type``/``resource_id``) or
-        camelCase keys; snake_case is translated for the wire.
+        camelCase keys; snake_case is translated for the wire. The items are
+        sent as ``checks``.
+
+        LumoAuth applies one environment to every check in a bulk call. Pass
+        it as ``environment``. An item may still carry a ``context`` (or
+        ``environment``) key, but every item that has one must carry the same
+        value, and it must match ``environment`` when you pass both. Otherwise
+        this raises :class:`LumoAuthValidationError`.
+
+        Returns ``{"results": [...]}``; each result has ``index``,
+        ``resourceType``, ``action``, ``resourceId``, ``allowed``, ``reason``,
+        and ``error`` for an invalid entry.
         """
         if not requests:
             raise LumoAuthValidationError("At least one check request is required.")
+        if len(requests) > 100:
+            raise LumoAuthValidationError("A bulk ABAC check takes at most 100 checks.")
+        shared: Optional[Dict[str, Any]] = dict(environment) if environment else None
         wire = []
         for item in requests:
             entry: Dict[str, Any] = {}
+            item_env: Optional[Dict[str, Any]] = None
             for key, value in item.items():
                 if key == "resource_type":
                     entry["resourceType"] = value
                 elif key == "resource_id":
                     entry["resourceId"] = value
+                elif key in ("context", "environment"):
+                    if value:
+                        item_env = dict(value)
                 else:
                     entry[key] = value
+            if item_env is not None:
+                if shared is None:
+                    shared = item_env
+                elif item_env != shared:
+                    raise LumoAuthValidationError(
+                        "LumoAuth applies one environment to every check in a bulk call; "
+                        "the checks carry different contexts. Pass one shared environment, "
+                        "or call check() for each context."
+                    )
             wire.append(entry)
-        return self._http.call("abac.check_bulk", json={"requests": wire})
+        body: Dict[str, Any] = {"checks": wire}
+        if shared:
+            body["environment"] = shared
+        return self._http.call("abac.check_bulk", json=body)
 
     # ── User attributes ───────────────────────────────────────────────
 

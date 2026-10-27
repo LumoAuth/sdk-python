@@ -14,7 +14,7 @@ from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError
 from lumoauth.resources.approvals import ApprovalsResource
 from lumoauth.resources.delegation import DelegationResource
 from lumoauth.resources.jit import JitResource
-from lumoauth.resources.mcp import McpResource
+from lumoauth.resources.mcp import McpResource, validate_mcp_server_id
 
 logger = logging.getLogger("lumoauth")
 
@@ -427,13 +427,21 @@ class LumoAuthAgent:
 
         Uses the RFC 8693 Token Exchange grant type.
 
+        The server id is sent as the RFC 8707 ``resource`` parameter, so the
+        token's ``aud`` is the MCP server.
+
         Args:
-            mcp_server_id: The audience identifier of the target MCP server
-                (e.g. ``"urn:mcp:financial-data"``).
+            mcp_server_id: The MCP server's https URL, its RFC 8707 resource
+                identifier (e.g. ``"https://mcp.example.com/mcp"``).
 
         Returns:
-            An access token string, or *None* on failure.
+            An access token string, or *None* when the exchange fails.
+
+        Raises:
+            LumoAuthValidationError: *mcp_server_id* is not an absolute
+                http(s) URL (a programming error, so it is not swallowed).
         """
+        validate_mcp_server_id(mcp_server_id)
         self.ensure_authenticated()
 
         logger.info("Exchanging token for MCP server %s", mcp_server_id)

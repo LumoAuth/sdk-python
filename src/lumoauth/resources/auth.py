@@ -23,7 +23,8 @@ TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 # the subject when an agent acts on a user's behalf, i.e. actor_token is an
 # agent access token: 400 invalid_request). JIT
 # permission tokens, logout tokens and other special-purpose JWTs are never
-# accepted under any type.
+# accepted under any type. The subject must still be an active principal: a
+# deactivated or blocked user, or a suspended agent, is invalid_grant.
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
 ID_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id_token"

@@ -202,3 +202,35 @@ def test_call_formats_route_with_org_id():
     method, url, _ = session.last
     assert method == "POST"
     assert url == f"{BASE}/orgs/acme/api/v1/agents/ask"
+
+
+def test_scope_refusal_exposes_required_scopes():
+    client, session = make_client()
+    session.queue(
+        FakeResponse(
+            403,
+            {
+                "error": "forbidden",
+                "message": "Insufficient scope: this API key is missing a required scope",
+                "status": 403,
+                "details": {
+                    "required_scopes": ["authz:read"],
+                    "granted_scopes": ["admin:users:read"],
+                },
+            },
+        )
+    )
+    with pytest.raises(LumoAuthPermissionDeniedError) as exc_info:
+        client.request("GET", "/api/v1/authz/permissions")
+    err = exc_info.value
+    assert err.required_scopes == ["authz:read"]
+    assert "Insufficient scope" in str(err)
+
+
+def test_plain_permission_denial_has_no_required_scopes():
+    client, session = make_client()
+    session.queue(FakeResponse(403, {"error": "nope"}))
+    with pytest.raises(LumoAuthPermissionDeniedError) as exc_info:
+        client.request("GET", "/thing")
+    assert exc_info.value.required_scopes == []
+    assert LumoAuthPermissionDeniedError().required_scopes == []

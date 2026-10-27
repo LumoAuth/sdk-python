@@ -40,8 +40,40 @@ def test_permissions_check_with_context_and_user_id(client, fake_session):
     assert kwargs["json"] == {
         "permission": "document.edit",
         "context": {"document_id": 456},
-        "user_id": "user-9",
+        "subject": {"type": "user", "id": "user-9"},
     }
+    assert "user_id" not in kwargs["json"]
+
+
+def test_permissions_subject_is_sent_on_bulk_any_and_all(client, fake_session):
+    uid = "01a176cb-4095-7bb1-b3fe-7a9b8943e0cf"
+    fake_session.queue(
+        FakeResponse(200, {"results": {"a": True}}),
+        FakeResponse(200, {"allowed": True}),
+        FakeResponse(200, {"allowed": False}),
+    )
+    client.permissions.check_bulk(["a"], user_id=uid)
+    client.permissions.check_any(["a", "b"], user_id=uid)
+    client.permissions.check_all(["a", "b"], user_id=uid)
+    for _, _, kwargs in fake_session.calls:
+        assert kwargs["json"]["subject"] == {"type": "user", "id": uid}
+        assert "user_id" not in kwargs["json"]
+
+
+def test_permissions_agent_subject(client, fake_session):
+    fake_session.queue(FakeResponse(200, {"allowed": True}))
+    assert client.permissions.check("tickets.read", agent_id="agt_c8ed16883d441af8") is True
+    _, _, kwargs = fake_session.last
+    assert kwargs["json"] == {
+        "permission": "tickets.read",
+        "subject": {"type": "agent", "id": "agt_c8ed16883d441af8"},
+    }
+
+
+def test_permissions_user_and_agent_subject_together_is_rejected(client, fake_session):
+    with pytest.raises(LumoAuthValidationError):
+        client.permissions.check("p", user_id="u", agent_id="agt_1")
+    assert fake_session.calls == []
 
 
 def test_permissions_check_detailed_returns_full_dict(client, fake_session):
@@ -193,8 +225,9 @@ def test_abac_check_is_org_scoped_and_camel_cased(client, fake_session):
         "resourceType": "document",
         "action": "read",
         "resourceId": "doc-123",
-        "context": {"resource": {"classification": "internal"}},
+        "environment": {"resource": {"classification": "internal"}},
     }
+    assert "context" not in kwargs["json"]
 
 
 def test_abac_is_allowed_shorthand(client, fake_session):
@@ -213,11 +246,50 @@ def test_abac_check_bulk_translates_snake_case(client, fake_session):
     _, url, kwargs = fake_session.last
     assert url == f"{BASE}/orgs/{ORG}/api/v1/abac/check-bulk"
     assert kwargs["json"] == {
-        "requests": [
+        "checks": [
             {"resourceType": "document", "resourceId": "doc-1", "action": "read"},
             {"resourceType": "api", "action": "execute"},
         ]
     }
+
+
+def test_abac_check_bulk_sends_one_shared_environment(client, fake_session):
+    fake_session.queue(FakeResponse(200, {"results": []}), FakeResponse(200, {"results": []}))
+    client.abac.check_bulk(
+        [{"resource_type": "document", "action": "read"}],
+        environment={"pep": {"ip": "10.0.0.8"}},
+    )
+    _, _, kwargs = fake_session.last
+    assert kwargs["json"] == {
+        "checks": [{"resourceType": "document", "action": "read"}],
+        "environment": {"pep": {"ip": "10.0.0.8"}},
+    }
+
+    same = {"pep": {"ip": "10.0.0.9"}}
+    client.abac.check_bulk([
+        {"resource_type": "document", "action": "read", "context": same},
+        {"resource_type": "document", "action": "write", "context": same},
+        {"resource_type": "api", "action": "execute"},
+    ])
+    _, _, kwargs = fake_session.last
+    assert kwargs["json"]["environment"] == same
+    assert all("context" not in c for c in kwargs["json"]["checks"])
+
+
+def test_abac_check_bulk_rejects_different_contexts(client, fake_session):
+    with pytest.raises(LumoAuthValidationError, match="one environment"):
+        client.abac.check_bulk([
+            {"resource_type": "document", "action": "read", "context": {"a": 1}},
+            {"resource_type": "document", "action": "read", "context": {"a": 2}},
+        ])
+    with pytest.raises(LumoAuthValidationError, match="one environment"):
+        client.abac.check_bulk(
+            [{"resource_type": "document", "action": "read", "context": {"a": 1}}],
+            environment={"a": 2},
+        )
+    with pytest.raises(LumoAuthValidationError):
+        client.abac.check_bulk([{"resource_type": "d", "action": "r"}] * 101)
+    assert fake_session.calls == []
 
 
 def test_abac_attribute_endpoints(client, fake_session):
@@ -281,7 +353,7 @@ def test_token_exchange_declares_the_token_types(client, fake_session):
 
     fake_session.queue(FakeResponse(200, {"access_token": "x"}), FakeResponse(200, {"access_token": "y"}))
 
-    client.auth.token_exchange("subject", actor_token="actor", audience="urn:mcp:x")
+    client.auth.token_exchange("subject", actor_token="actor", audience="https://mcp.example.com/mcp")
     _, _, kwargs = fake_session.last
     assert kwargs["data"]["subject_token_type"] == ACCESS_TOKEN_TYPE, "access_token is the default"
     assert kwargs["data"]["actor_token_type"] == ACCESS_TOKEN_TYPE

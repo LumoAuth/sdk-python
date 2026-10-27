@@ -5,7 +5,7 @@ Mirrors the JS SDK's error hierarchy (same names and codes):
     LumoAuthError
     ├── LumoAuthApiError            (any non-2xx HTTP response)
     │   ├── LumoAuthAuthenticationError   (401, code AUTHENTICATION_ERROR)
-    │   ├── LumoAuthPermissionDeniedError (403, code PERMISSION_DENIED)
+    │   ├── LumoAuthPermissionDeniedError (403, code PERMISSION_DENIED; required_scopes)
     │   ├── LumoAuthNotFoundError         (404, code NOT_FOUND)
     │   └── LumoAuthRateLimitError        (429, code RATE_LIMITED)
     ├── LumoAuthValidationError     (bad input / unexpected response shape)
@@ -13,6 +13,7 @@ Mirrors the JS SDK's error hierarchy (same names and codes):
     ├── LumoAuthNetworkError        (transport failure: DNS, timeout, TLS, …)
     ├── LumoAuthApprovalDeniedError
     ├── LumoAuthApprovalTimeoutError
+    ├── LumoAuthApprovalNotDeliveredError (code APPROVAL_NOT_DELIVERED; reason)
     └── LumoAuthBudgetExceededError
 
 Backwards compatibility: earlier releases of this SDK raised bare
@@ -41,6 +42,7 @@ __all__ = [
     "LumoAuthNetworkError",
     "LumoAuthApprovalDeniedError",
     "LumoAuthApprovalTimeoutError",
+    "LumoAuthApprovalNotDeliveredError",
     "LumoAuthBudgetExceededError",
 ]
 
@@ -83,7 +85,14 @@ class LumoAuthAuthenticationError(LumoAuthApiError):
 
 
 class LumoAuthPermissionDeniedError(LumoAuthApiError):
-    """403 — the authenticated principal is not allowed to do this."""
+    """403 — the authenticated principal is not allowed to do this.
+
+    When the credential lacks a scope that the route needs, the server answers
+    ``{"error": "forbidden", "message": "Insufficient scope: …", "status": 403,
+    "details": {"required_scopes": ["authz:read"], "granted_scopes": […]}}``.
+    ``required_scopes`` lists the scopes it named; it is empty for a plain
+    permission denial.
+    """
 
     def __init__(
         self,
@@ -93,6 +102,19 @@ class LumoAuthPermissionDeniedError(LumoAuthApiError):
         body: Any = None,
     ) -> None:
         super().__init__(message, code, status_code, body)
+        self.required_scopes: List[str] = _required_scopes(body)
+
+
+def _required_scopes(body: Any) -> List[str]:
+    if not isinstance(body, dict):
+        return []
+    details = body.get("details")
+    if not isinstance(details, dict):
+        return []
+    scopes = details.get("required_scopes")
+    if not isinstance(scopes, list):
+        return []
+    return [s for s in scopes if isinstance(s, str) and s]
 
 
 class LumoAuthNotFoundError(LumoAuthApiError):
@@ -164,6 +186,36 @@ class LumoAuthApprovalTimeoutError(LumoAuthError):
 
     def __init__(self, message: str = "Approval timed out.") -> None:
         super().__init__(message, "APPROVAL_TIMEOUT")
+
+
+class LumoAuthApprovalNotDeliveredError(LumoAuthError):
+    """No push prompt reached the user, so the approval cannot happen now.
+
+    ``reason`` says why:
+
+    - ``"email_fallback_sent"``: the server answered 202. The user has no
+      enrolled push device, so LumoAuth sent them a plain email notice
+      (it holds no approval link). The server gives the same answer when the
+      user does not exist. There is no approval token to poll.
+    - ``"no_enrolled_device"``: the server answered 428. The user has no
+      enrolled push device, and the email notice could not be sent.
+
+    ``task_id`` echoes the task id when the response carries one.
+    """
+
+    def __init__(
+        self,
+        message: str = "The approval request was not delivered to the user.",
+        reason: Optional[str] = None,
+        task_id: Optional[str] = None,
+        status_code: Optional[int] = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message, "APPROVAL_NOT_DELIVERED")
+        self.reason = reason
+        self.task_id = task_id
+        self.status_code = status_code
+        self.body = body
 
 
 class LumoAuthBudgetExceededError(LumoAuthError):

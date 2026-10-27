@@ -26,7 +26,10 @@ class AgentsResource:
         """Ask whether the agent may perform *action* (LLM tool preflight).
 
         Returns a dict with ``allowed``, ``action``, ``reason``, ``audit_id``
-        and the original ``context``.
+        and the original ``context``. ``ip``, ``userAgent``, ``requestMethod``
+        and ``requestPath`` in the context always describe the request that
+        LumoAuth received; values you pass under those names are kept under
+        ``pep`` (the same rule as ABAC).
         """
         body: Dict[str, Any] = {"action": action}
         if context:
@@ -42,7 +45,12 @@ class AgentsResource:
     # ── Identity ──────────────────────────────────────────────────────
 
     def me(self) -> Dict[str, Any]:
-        """Return the agent's own identity, capabilities, and workspace info."""
+        """Return the agent's own identity, capabilities, and workspace info.
+
+        For an agent credential, ``capabilities`` are the agent's capability
+        roles. A user access token without the ``authz:read`` scope gets an
+        empty list.
+        """
         return self._http.call("agents.me")
 
     # Alias used by callers preferring an explicit name.

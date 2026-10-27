@@ -49,6 +49,7 @@ from lumoauth.delegation import DelegationChain
 from lumoauth.errors import (
     LumoAuthApiError,
     LumoAuthApprovalDeniedError,
+    LumoAuthApprovalNotDeliveredError,
     LumoAuthApprovalTimeoutError,
     LumoAuthAuthenticationError,
     LumoAuthBudgetExceededError,
@@ -85,5 +86,6 @@ __all__ = [
     "LumoAuthNetworkError",
     "LumoAuthApprovalDeniedError",
     "LumoAuthApprovalTimeoutError",
+    "LumoAuthApprovalNotDeliveredError",
     "LumoAuthBudgetExceededError",
 ]
