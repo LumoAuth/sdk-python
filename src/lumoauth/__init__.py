@@ -62,6 +62,8 @@ from lumoauth.errors import (
     LumoAuthValidationError,
 )
 from lumoauth.jit import JITContext
+from lumoauth.resources.agents import AgentMcpToolDecision
+from lumoauth.resources.mcp import McpToolDecision
 
 __all__ = [
     # Clients
@@ -74,6 +76,8 @@ __all__ = [
     "require_capability",
     "require_approval",
     "ApprovalResult",
+    "McpToolDecision",
+    "AgentMcpToolDecision",
     # Errors
     "LumoAuthError",
     "LumoAuthApiError",

@@ -896,6 +896,74 @@ The ID must be an absolute `https` URL with no fragment. LumoAuth accepts
 sends a request. `get_mcp_token()` raises this error too, and does not
 return `None` for it.
 
+The token names exactly one MCP server. Pass the Resource URI that is
+registered for that server. The token works only at that MCP server, and
+LumoAuth's own API rejects it. If the MCP server requires DPoP, you need a
+DPoP-bound exchange. These two helpers do not make one.
+
+#### Check a tool from an MCP server
+
+An MCP server can ask LumoAuth whether a caller may run one tool. The
+server must not forward the caller's token, because the MCP specification
+(revision 2026-07-28) forbids token passthrough. The server signs in with
+its own client credentials and the scope `mcp:authorize` instead. An
+administrator must list the server's client as a tool authorizer of the
+MCP server.
+
+```python
+from lumoauth import LumoAuth
+
+lumo = LumoAuth(org_id="acme-corp")
+cc = lumo.auth.client_credentials("mcp-server-client", "…", scopes=["mcp:authorize"])
+server = LumoAuth(org_id="acme-corp", token_provider=lambda: cc["access_token"])
+
+# claims: the verified MCP token of the caller
+subject_type = "agent" if claims["sub"].startswith("agent_") else "user"
+decision = server.mcp.authorize_tool(
+    "mcp_0123456789abcdef01234567",   # the registered MCP server id
+    subject_type,
+    claims["sub"],
+    "send_payment_reminder",
+)
+if not decision.allowed:
+    ...  # refuse the tool call
+```
+
+- The first argument is the id of the MCP server in LumoAuth (`mcp_…`).
+  It is not the Resource URI.
+- For a user, pass the `sub` of the MCP token. For an agent, pass the
+  `sub` (`agent_agt_…`) or the agent id (`agt_…`).
+- The method returns `McpToolDecision(allowed, subject_type, subject_id,
+  resource_type, resource_id)`. The `resource_id` has the form
+  `<server id>/<tool>`.
+- A deny returns `allowed=False` and does not raise. A 403 without a
+  decision, such as `insufficient_scope`, raises
+  `LumoAuthPermissionDeniedError`. An unknown server raises
+  `LumoAuthNotFoundError`.
+- A tool name or server id that is empty, or that contains `/`, `:`, `#`
+  or `*`, raises `LumoAuthValidationError`. So does a tool name longer
+  than 80 characters. The SDK sends no request in that case.
+
+The token from `client_credentials()` expires. Request a new one before
+it does, or wrap the call in your own token cache.
+
+#### Check a tool as an agent
+
+An agent can ask the same question about itself, with its own credential:
+
+```python
+decision = agent.authorize_mcp_tool("mcp_0123456789abcdef01234567", "send_payment_reminder")
+if decision.allowed:
+    ...  # call the tool
+```
+
+The method returns `AgentMcpToolDecision(allowed, agent_id, resource_type,
+resource_id)`. A deny returns `allowed=False` and does not raise. The
+server id must name an active MCP server. Otherwise the call raises
+`LumoAuthNotFoundError` (`unknown_server`). `client.agents.authorize_mcp_tool()`
+does the same on a `LumoAuth` client that holds an agent token or an
+`agk_` key.
+
 ### AAuth cryptographic identity
 
 AAuth extends OAuth 2.1 with a cryptographic identity for the agent. The agent
@@ -1111,6 +1179,7 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 | `ask(action, context=None)` | Ask API decision `dict` |
 | `is_allowed(action, context=None)` | The decision as a `bool` |
 | `me()` (alias `get_current()`) | `identity`, `capabilities` and `workspace` |
+| `authorize_mcp_tool(server_id, tool)` | Asks whether the calling agent may run a tool on a registered MCP server; returns `AgentMcpToolDecision`, with `allowed=False` for a deny |
 | `register(name, *, client_id, description=None, capabilities=None, jwks_uri=None)` | Creates or updates an agent record; a user token needs `admin:agents:write` |
 | `info()` | The userinfo claims of the agent |
 | `capabilities()` | The agent's capability slugs |
@@ -1153,6 +1222,7 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 | Member | What it does |
 |---|---|
 | `mcp.get_token(server_id, *, subject_token=None)` | Token exchange for an MCP server, with `server_id` (its https URL) as `resource`; returns the token string |
+| `mcp.authorize_tool(server_id, subject_type, subject_id, tool)` | Per-tool check for an MCP server, made with the server's own `mcp:authorize` token; returns `McpToolDecision`, with `allowed=False` for a deny |
 | `api` | The generated OpenAPI client; needs `lumoauth[api]` |
 
 ### `LumoAuthAgent`
@@ -1172,6 +1242,7 @@ LumoAuthAgent(base_url=None, org_id=None, client_id=None, client_secret=None,
 | `get_budget_status()`, `is_budget_exhausted()` | Budget policy, and whether today's budget is used up |
 | `ask(action, context=None)`, `is_allowed(...)` | Ask API |
 | `get_identity()` | `GET /agents/me` |
+| `authorize_mcp_tool(server_id, tool)` | Asks whether this agent may run a tool on a registered MCP server; returns `AgentMcpToolDecision` |
 | `api_request(method, endpoint, *, data=None, json=None, params=None, timeout=30)` | Authenticated request; returns `requests.Response` |
 | `register(name, description=None, capabilities=None, jwks_uri=None)` | Creates or updates the agent record |
 | `get_mcp_token(mcp_server_id)` | MCP token bound to the server's https URL, or `None` when the exchange fails |
@@ -1305,6 +1376,12 @@ They are skipped when neither exists.
 
 ### Unreleased
 
+- New `mcp.authorize_tool()` lets an MCP server ask whether a verified
+  user or agent may run one tool. The server calls it with its own
+  client-credentials token (scope `mcp:authorize`), not with the caller's
+  token. New `agents.authorize_mcp_tool()` and
+  `LumoAuthAgent.authorize_mcp_tool()` let an agent ask about itself. On
+  both, a deny returns `allowed=False` and does not raise.
 - `LumoAuthPermissionDeniedError.required_scopes` lists the scopes that
   LumoAuth names when it refuses a request for a missing scope.
 - Fix: permission checks with `user_id` now send the user as

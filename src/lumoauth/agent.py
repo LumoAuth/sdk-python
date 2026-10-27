@@ -11,6 +11,7 @@ import requests
 
 from lumoauth.client import LumoAuth
 from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError
+from lumoauth.resources.agents import AgentMcpToolDecision
 from lumoauth.resources.approvals import ApprovalsResource
 from lumoauth.resources.delegation import DelegationResource
 from lumoauth.resources.jit import JitResource
@@ -326,6 +327,39 @@ class LumoAuthAgent:
         )
         return data
 
+    def authorize_mcp_tool(self, server_id: str, tool: str) -> AgentMcpToolDecision:
+        """Ask whether this agent may run *tool* on a registered MCP server.
+
+        Calls ``POST /agents/me/mcp/authorize`` with the agent's own token.
+
+        Args:
+            server_id: The registered MCP server id (``mcp_…``), not its URL.
+            tool: The tool name, at most 80 characters.
+
+        Returns:
+            :class:`lumoauth.AgentMcpToolDecision`. A deny returns
+            ``allowed=False`` and does not raise.
+
+        Raises:
+            LumoAuthValidationError: An argument is empty or malformed.
+            LumoAuthApiError: Any other error, for example
+                ``LumoAuthNotFoundError`` for an unknown server.
+        """
+        self.ensure_authenticated()
+
+        try:
+            decision = self._client.agents.authorize_mcp_tool(server_id, tool)
+        except LumoAuthApiError as exc:
+            _reraise_with_prefix(exc, "MCP tool authorization failed")
+
+        logger.info(
+            "authorize_mcp_tool(%s, %s) → allowed=%s",
+            server_id,
+            tool,
+            decision.allowed,
+        )
+        return decision
+
     # =========================================================================
     # Generic API requests
     # =========================================================================
@@ -427,8 +461,12 @@ class LumoAuthAgent:
 
         Uses the RFC 8693 Token Exchange grant type.
 
-        The server id is sent as the RFC 8707 ``resource`` parameter, so the
-        token's ``aud`` is the MCP server.
+        The new token names exactly one MCP server. The server id is sent
+        as the RFC 8707 ``resource`` parameter, so the token's ``aud`` is
+        that MCP server. Pass the server's registered Resource URI. The
+        token works only at that MCP server, and LumoAuth's own API rejects
+        it. A server that requires DPoP needs a DPoP-bound exchange, which
+        this helper does not make.
 
         Args:
             mcp_server_id: The MCP server's https URL, its RFC 8707 resource

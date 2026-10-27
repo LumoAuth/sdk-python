@@ -29,6 +29,12 @@ ROUTES: Dict[str, Tuple[str, str]] = {
     "agents.ask": ("POST", _ORG + "/agents/ask"),
     "agents.me": ("GET", _ORG + "/agents/me"),
     "agents.register": ("POST", _ORG + "/agents/register"),
+    "agents.authorize_mcp_tool": ("POST", _ORG + "/agents/me/mcp/authorize"),
+    # ── MCP per-tool checks (the MCP server's own token) ──────────────
+    "mcp.authorize_tool": (
+        "POST",
+        _ORG + "/mcp/servers/{server_id}/tools/authorize",
+    ),
     # ── Push approvals ────────────────────────────────────────────────
     "approvals.create": ("POST", _ORG + "/agents/me/approvals"),
     "approvals.status": ("GET", _ORG + "/agents/me/approvals/{token}/status"),
