@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional
 
 import requests
 
@@ -17,6 +17,9 @@ from lumoauth.errors import (
     LumoAuthPermissionDeniedError,
     LumoAuthRateLimitError,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from lumoauth.dpop import DpopProofSigner
 
 logger = logging.getLogger("lumoauth.http")
 
@@ -42,6 +45,12 @@ class HttpClient:
       from JSON bodies when present.
     - Wraps ``requests`` transport exceptions in ``LumoAuthNetworkError``.
     - Returns parsed JSON (or ``None`` for 204 / empty bodies).
+    - DPoP (RFC 9449): when ``dpop`` holds a
+      :class:`~lumoauth.dpop.DpopProofSigner`, bearer tokens go out as
+      ``Authorization: DPoP …`` with a ``DPoP`` proof; a per-request
+      ``dpop=`` signer adds a proof to an unauthenticated call (the token
+      endpoint). A ``use_dpop_nonce`` answer is retried once with the
+      nonce the server sent.
     """
 
     def __init__(
@@ -62,6 +71,8 @@ class HttpClient:
         self.timeout = timeout
         self.verify_tls = verify_tls
         self.session = session if session is not None else requests.Session()
+        # Set when the bearer token from ``token_provider`` is DPoP-bound.
+        self.dpop: Optional["DpopProofSigner"] = None
 
     # ── URL helpers ───────────────────────────────────────────────────
 
@@ -100,6 +111,7 @@ class HttpClient:
         timeout: Optional[float] = None,
         auth: bool = True,
         raw: bool = False,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Any:
         """Invoke a route from the :mod:`lumoauth._routes` registry."""
         method, path = self._fill_route(route, path_params)
@@ -113,6 +125,7 @@ class HttpClient:
             timeout=timeout,
             auth=auth,
             raw=raw,
+            dpop=dpop,
         )
 
     def request(
@@ -127,11 +140,14 @@ class HttpClient:
         timeout: Optional[float] = None,
         auth: bool = True,
         raw: bool = False,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Any:
         """Send a request to a path (joined to ``base_url``) or a full URL.
 
         With ``raw=True`` the :class:`requests.Response` is returned without
-        status mapping (transport errors are still wrapped).
+        status mapping (transport errors are still wrapped). ``dpop`` adds a
+        DPoP proof without a token (token endpoint); bearer tokens are
+        DPoP-bound when :attr:`dpop` is set on the client.
         """
         url = (
             path_or_url
@@ -140,30 +156,47 @@ class HttpClient:
         )
 
         hdrs: Dict[str, str] = dict(headers or {})
+        signer = dpop
+        proof_token: Optional[str] = None
         if auth and "Authorization" not in hdrs and "X-API-Key" not in hdrs:
             token = self.token_provider() if self.token_provider else None
             if token:
-                hdrs["Authorization"] = f"Bearer {token}"
+                if self.dpop is not None:
+                    signer, proof_token = self.dpop, token
+                    hdrs["Authorization"] = f"DPoP {token}"
+                else:
+                    hdrs["Authorization"] = f"Bearer {token}"
             elif self.api_key:
                 # The server accepts API keys via X-API-Key (leaving the
                 # Authorization header free for bearer tokens).
                 hdrs["X-API-Key"] = self.api_key
+        add_proof = signer is not None and "DPoP" not in hdrs
 
-        try:
-            resp = self.session.request(
-                method.upper(),
-                url,
-                json=json,
-                data=data,
-                params=dict(params) if params else None,
-                headers=hdrs,
-                timeout=timeout if timeout is not None else self.timeout,
-                verify=self.verify_tls,
-            )
-        except requests.RequestException as exc:
-            raise LumoAuthNetworkError(
-                f"Request to {url} failed: {exc}", cause=exc
-            ) from exc
+        for attempt in (0, 1):
+            send_headers = dict(hdrs)
+            if add_proof:
+                send_headers["DPoP"] = signer.create_proof(method, url, access_token=proof_token)
+            try:
+                resp = self.session.request(
+                    method.upper(),
+                    url,
+                    json=json,
+                    data=data,
+                    params=dict(params) if params else None,
+                    headers=send_headers,
+                    timeout=timeout if timeout is not None else self.timeout,
+                    verify=self.verify_tls,
+                )
+            except requests.RequestException as exc:
+                raise LumoAuthNetworkError(
+                    f"Request to {url} failed: {exc}", cause=exc
+                ) from exc
+            if not add_proof:
+                break
+            signer.observe_response(url, resp.headers)
+            if attempt == 1 or not _wants_new_nonce(resp):
+                break
+            logger.debug("Server asked for a DPoP nonce; retrying %s %s once", method, url)
 
         if raw:
             return resp
@@ -236,6 +269,14 @@ class HttpClient:
         elif isinstance(body, str) and body.strip():
             message = f"HTTP {resp.status_code} — {body.strip()[:500]}"
         return message, code
+
+
+def _wants_new_nonce(resp: requests.Response) -> bool:
+    from lumoauth.dpop import wants_new_nonce
+
+    if resp.status_code not in (400, 401):
+        return False
+    return wants_new_nonce(resp.status_code, resp.headers, HttpClient._parse_body(resp))
 
 
 def _parse_retry_after(value: Optional[str]) -> Optional[float]:

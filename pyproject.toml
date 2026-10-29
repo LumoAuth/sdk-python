@@ -32,6 +32,15 @@ dependencies = [
 aauth = [
     "cryptography>=41.0",
 ]
+# RFC 9449 DPoP proofs (lumoauth.dpop) and local at+jwt verification
+# (lumoauth.verify) both sign/verify with cryptography; the extras are
+# aliases so that `pip install "lumoauth[dpop]"` and `[verify]` read naturally.
+dpop = [
+    "cryptography>=41.0",
+]
+verify = [
+    "cryptography>=41.0",
+]
 api = [
     "lumoauth-api-client>=0.1.0",
 ]

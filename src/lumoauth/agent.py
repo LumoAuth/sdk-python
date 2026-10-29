@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import requests
 
@@ -15,7 +15,10 @@ from lumoauth.resources.agents import AgentMcpToolDecision
 from lumoauth.resources.approvals import ApprovalsResource
 from lumoauth.resources.delegation import DelegationResource
 from lumoauth.resources.jit import JitResource
-from lumoauth.resources.mcp import McpResource, validate_mcp_server_id
+from lumoauth.resources.mcp import McpResource, McpToken, validate_mcp_server_id
+
+if TYPE_CHECKING:  # pragma: no cover
+    from lumoauth.dpop import DpopKey, DpopProofSigner
 
 logger = logging.getLogger("lumoauth")
 
@@ -33,6 +36,8 @@ class LumoAuthAgent:
     - Capability and budget introspection via the UserInfo endpoint
     - Authenticated API requests
     - RFC 8693 token exchange for secured MCP servers
+    - Optional DPoP (RFC 9449): with ``dpop=`` every token the agent obtains
+      is bound to its key, and each request carries a proof
 
     Example::
 
@@ -55,6 +60,7 @@ class LumoAuthAgent:
         client_id: str | None = None,
         client_secret: str | None = None,
         skip_cert_validation: bool = False,
+        dpop: Union["DpopProofSigner", "DpopKey", bool, None] = None,
     ) -> None:
         """Initialise the agent client.
 
@@ -68,6 +74,15 @@ class LumoAuthAgent:
         ``client_id``    ``AGENT_CLIENT_ID``
         ``client_secret`` ``AGENT_CLIENT_SECRET``
         ===============  ========================
+
+        Args:
+            dpop: Turn on DPoP (RFC 9449). ``True`` generates an ephemeral
+                ES256 key; a :class:`~lumoauth.dpop.DpopKey` (for example
+                one loaded from PEM) or a ready
+                :class:`~lumoauth.dpop.DpopProofSigner` uses that key. The
+                client-credentials token, MCP token exchanges and every
+                API request then carry a DPoP proof. Needs the
+                ``cryptography`` package (``pip install "lumoauth[dpop]"``).
 
         Raises:
             LumoAuthConfigError: If ``client_id`` or ``client_secret`` cannot
@@ -93,8 +108,12 @@ class LumoAuthAgent:
 
         # Token state
         self._access_token: str | None = None
+        self._token_type: str = "Bearer"
         self._token_expires_at: float = 0.0
         self._token_scopes: list[str] = []
+
+        # DPoP signer (None when the agent uses plain bearer tokens)
+        self.dpop: "DpopProofSigner | None" = _coerce_dpop(dpop)
 
         # Cached agent info (populated by :meth:`get_agent_info`)
         self._agent_info: dict[str, Any] | None = None
@@ -114,6 +133,11 @@ class LumoAuthAgent:
     def access_token(self) -> str | None:
         """The current access token, or *None* if not yet authenticated."""
         return self._access_token
+
+    @property
+    def token_type(self) -> str:
+        """``"Bearer"``, or ``"DPoP"`` when the current token is DPoP-bound."""
+        return self._token_type
 
     @property
     def token_scopes(self) -> list[str]:
@@ -170,20 +194,28 @@ class LumoAuthAgent:
 
         try:
             body = self._client.auth.client_credentials(
-                self.client_id, self.client_secret, scopes=scopes
+                self.client_id, self.client_secret, scopes=scopes, dpop=self.dpop
             )
         except LumoAuthApiError as exc:
             logger.error("Authentication failed: HTTP %s — %s", exc.status_code, exc)
             return False
 
         self._access_token = body["access_token"]
+        self._token_type = str(body.get("token_type") or "Bearer")
         self._token_scopes = body.get("scope", "").split()
         expires_in = body.get("expires_in", 3600)
         self._token_expires_at = time.time() + expires_in - self._TOKEN_REFRESH_BUFFER
+        # A DPoP-bound token must travel as `Authorization: DPoP` with a
+        # proof on every request; a Bearer answer (server without DPoP)
+        # keeps the plain bearer scheme.
+        self._client._http.dpop = (
+            self.dpop if self.dpop is not None and self._token_type.lower() == "dpop" else None
+        )
         logger.info(
-            "Authentication successful (expires_in=%ds, scopes=%s)",
+            "Authentication successful (expires_in=%ds, scopes=%s, token_type=%s)",
             expires_in,
             self._token_scopes or "default",
+            self._token_type,
         )
         return True
 
@@ -465,8 +497,10 @@ class LumoAuthAgent:
         as the RFC 8707 ``resource`` parameter, so the token's ``aud`` is
         that MCP server. Pass the server's registered Resource URI. The
         token works only at that MCP server, and LumoAuth's own API rejects
-        it. A server that requires DPoP needs a DPoP-bound exchange, which
-        this helper does not make.
+        it. When the agent was created with ``dpop=``, the exchange carries
+        a DPoP proof and the token is DPoP-bound: send it as
+        ``Authorization: DPoP`` with a proof (see :meth:`dpop_headers`), or
+        use :meth:`get_mcp_credential`, whose result builds those headers.
 
         Args:
             mcp_server_id: The MCP server's https URL, its RFC 8707 resource
@@ -480,21 +514,86 @@ class LumoAuthAgent:
                 http(s) URL (a programming error, so it is not swallowed).
         """
         validate_mcp_server_id(mcp_server_id)
-        self.ensure_authenticated()
-
-        logger.info("Exchanging token for MCP server %s", mcp_server_id)
-
         try:
-            token = self._client.mcp.get_token(
-                mcp_server_id, subject_token=self._access_token
-            )
+            return self.get_mcp_credential(mcp_server_id).access_token
         except (LumoAuthApiError, LumoAuthConfigError) as exc:
             status = getattr(exc, "status_code", None)
             logger.error("Token exchange failed: HTTP %s — %s", status, exc)
             return None
 
-        logger.info("Token exchange successful for MCP server %s", mcp_server_id)
-        return token
+    def get_mcp_credential(self, mcp_server_id: str) -> McpToken:
+        """Like :meth:`get_mcp_token`, but returns an :class:`McpToken` and raises.
+
+        The result carries ``token_type`` (``"Bearer"`` or ``"DPoP"``) and
+        ``headers(method, url)``, which builds the ``Authorization`` header
+        and, for a DPoP-bound token, a fresh ``DPoP`` proof with ``ath``::
+
+            cred = agent.get_mcp_credential("https://mcp.example.com/mcp")
+            requests.post(url, headers=cred.headers("POST", url), json=body)
+
+        Raises:
+            LumoAuthValidationError: *mcp_server_id* is not an absolute
+                http(s) URL.
+            LumoAuthApiError: LumoAuth refused the exchange.
+            LumoAuthConfigError: The agent could not authenticate.
+        """
+        validate_mcp_server_id(mcp_server_id)
+        if not self.ensure_authenticated():
+            raise LumoAuthConfigError("Agent authentication failed; see the log")
+
+        logger.info("Exchanging token for MCP server %s", mcp_server_id)
+        credential = self._client.mcp.exchange(
+            mcp_server_id, subject_token=self._access_token, dpop=self.dpop
+        )
+        logger.info(
+            "Token exchange successful for MCP server %s (token_type=%s)",
+            mcp_server_id,
+            credential.token_type,
+        )
+        return credential
+
+    # =========================================================================
+    # DPoP helpers (RFC 9449)
+    # =========================================================================
+
+    def dpop_proof(self, method: str, url: str, *, access_token: str | None = None) -> str:
+        """A DPoP proof JWT for one request (``htm``/``htu``, plus ``ath`` with a token).
+
+        Use it for endpoints the SDK does not wrap, such as the attestation
+        endpoint (``POST {issuer}/agents/{agent_id}/attest``): pass the full
+        request URL. The remembered ``DPoP-Nonce`` of that origin is included.
+
+        Raises:
+            LumoAuthConfigError: The agent was created without ``dpop=``.
+        """
+        return self._require_dpop().create_proof(method, url, access_token=access_token)
+
+    def dpop_headers(
+        self, method: str, url: str, *, access_token: str | None = None
+    ) -> dict[str, str]:
+        """``Authorization: DPoP <token>`` plus a ``DPoP`` proof for one request.
+
+        Without ``access_token`` the agent's own token is used (after
+        :meth:`ensure_authenticated`). Each call makes a new proof; call it
+        once per request.
+
+        Raises:
+            LumoAuthConfigError: The agent was created without ``dpop=``.
+        """
+        signer = self._require_dpop()
+        token = access_token
+        if token is None:
+            self.ensure_authenticated()
+            token = self._access_token
+        return signer.headers(method, url, token)
+
+    def _require_dpop(self) -> "DpopProofSigner":
+        if self.dpop is None:
+            raise LumoAuthConfigError(
+                "DPoP is not enabled on this agent: create it with "
+                "LumoAuthAgent(dpop=True) or dpop=DpopKey.from_pem(...)."
+            )
+        return self.dpop
 
     # -- private helpers ------------------------------------------------------
 
@@ -504,7 +603,26 @@ class LumoAuthAgent:
         return self._access_token
 
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._access_token}"}
+        return {"Authorization": f"{self._token_type} {self._access_token}"}
+
+
+def _coerce_dpop(
+    value: Union["DpopProofSigner", "DpopKey", bool, None]
+) -> "DpopProofSigner | None":
+    if value is None or value is False:
+        return None
+    from lumoauth.dpop import DpopKey, DpopProofSigner
+
+    if isinstance(value, DpopProofSigner):
+        return value
+    if isinstance(value, DpopKey):
+        return DpopProofSigner(value)
+    if value is True:
+        return DpopProofSigner()
+    raise LumoAuthConfigError(
+        "dpop must be True, a DpopKey or a DpopProofSigner, "
+        f"not {type(value).__name__}"
+    )
 
 
 def _reraise_with_prefix(exc: LumoAuthApiError, prefix: str) -> None:

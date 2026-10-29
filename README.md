@@ -41,6 +41,8 @@ if client.permissions.check("document.edit"):
   - [Just-in-Time permissions](#just-in-time-permissions)
   - [Delegation and token exchange](#delegation-and-token-exchange)
   - [MCP tokens](#mcp-tokens)
+  - [DPoP-bound tokens](#dpop-bound-tokens)
+  - [Verify a LumoAuth token in your MCP server](#verify-a-lumoauth-token-in-your-mcp-server)
   - [AAuth cryptographic identity](#aauth-cryptographic-identity)
   - [The generated API client](#the-generated-api-client)
 - [Errors](#errors)
@@ -60,6 +62,8 @@ if client.permissions.check("document.edit"):
 | Extra | Install | Adds |
 |---|---|---|
 | `aauth` | `pip install "lumoauth[aauth]"` | Ed25519 signing for AAuth (`cryptography` 41 or later) |
+| `dpop` | `pip install "lumoauth[dpop]"` | DPoP proofs (RFC 9449) for sender-constrained tokens (`cryptography` 41 or later) |
+| `verify` | `pip install "lumoauth[verify]"` | Local verification of LumoAuth access tokens in your MCP or API server (`cryptography` 41 or later) |
 | `fastapi` | `pip install "lumoauth[fastapi]"` | Login, callback and logout routes for FastAPI 0.110 or later |
 | `api` | `pip install "lumoauth[api]"` | The generated client for the full REST API, as `client.api` |
 
@@ -515,6 +519,9 @@ print(agent.token_scopes)   # the scopes that LumoAuth granted
 
 - `authenticate(scopes=None)` returns `True` on success and `False` on
   failure. Without `scopes`, LumoAuth grants the agent's registered defaults.
+- `LumoAuthAgent(dpop=True)`, or `dpop=DpopKey.from_pem(...)`, binds the
+  token to a key that the agent holds. See
+  [DPoP-bound tokens](#dpop-bound-tokens).
 - Every other method calls `ensure_authenticated()` first. That method signs
   in again when the token is missing or within 60 seconds of expiry.
 
@@ -898,8 +905,16 @@ return `None` for it.
 
 The token names exactly one MCP server. Pass the Resource URI that is
 registered for that server. The token works only at that MCP server, and
-LumoAuth's own API rejects it. If the MCP server requires DPoP, you need a
-DPoP-bound exchange. These two helpers do not make one.
+LumoAuth's own API rejects it. If the MCP server requires DPoP, make the
+exchange DPoP-bound: create the agent with `dpop=True`, or pass a
+`DpopProofSigner` as `dpop=` to `client.mcp.get_token()`. See
+[DPoP-bound tokens](#dpop-bound-tokens).
+
+`agent.get_mcp_credential()` returns the whole answer as an `McpToken`
+(`access_token`, `token_type`, `expires_in`, `scope`), and its
+`headers(method, url)` builds the request headers for the MCP server, with
+the DPoP proof when the token needs one. `client.mcp.exchange()` does the
+same on a plain client.
 
 #### Check a tool from an MCP server
 
@@ -963,6 +978,133 @@ server id must name an active MCP server. Otherwise the call raises
 `LumoAuthNotFoundError` (`unknown_server`). `client.agents.authorize_mcp_tool()`
 does the same on a `LumoAuth` client that holds an agent token or an
 `agk_` key.
+
+### DPoP-bound tokens
+
+[DPoP](https://www.rfc-editor.org/rfc/rfc9449) (RFC 9449) binds a token to a
+key that the agent holds. A stolen token is then useless without the key. An
+MCP server registered with "Require DPoP" accepts only such tokens.
+
+```python
+from lumoauth import LumoAuthAgent
+from lumoauth.dpop import DpopKey
+
+key = DpopKey.generate()                      # ES256 (P-256); DpopKey.generate("EdDSA") for Ed25519
+open("dpop.pem", "w").write(key.to_pem())     # keep it between runs, or use dpop=True for an ephemeral key
+
+agent = LumoAuthAgent(dpop=DpopKey.from_pem(open("dpop.pem").read()))
+agent.authenticate()
+print(agent.token_type)                       # "DPoP"
+
+cred = agent.get_mcp_credential("https://mcp.example.com/mcp")
+headers = cred.headers("POST", "https://mcp.example.com/mcp")
+# {"Authorization": "DPoP <token>", "DPoP": "<proof with ath>"}
+requests.post("https://mcp.example.com/mcp", headers=headers, json=body)
+```
+
+- The client-credentials sign-in, every MCP token exchange and every request
+  that the agent makes to LumoAuth's own API carry a DPoP proof. The proof
+  names the method (`htm`), the URL without its query (`htu`), the time
+  (`iat`), a fresh `jti`, and the hash of the token (`ath`) when a token is
+  sent with it.
+- When LumoAuth answers `use_dpop_nonce` with a `DPoP-Nonce` header, the SDK
+  retries once with that nonce and remembers the latest nonce for each
+  origin.
+- `agent.token_type` and `McpToken.token_type` are `"DPoP"` for a bound
+  token and `"Bearer"` otherwise. A bound token travels as `Authorization:
+  DPoP …`, never as `Bearer`.
+- Call `headers()` once per request. A proof is good for one request only.
+- For an endpoint that the SDK does not wrap, such as the attestation
+  endpoint, `agent.dpop_headers("POST", url)` gives the `Authorization` and
+  `DPoP` headers for the agent's own token, and `agent.dpop_proof("POST",
+  url)` gives a bare proof.
+- On a plain `LumoAuth` client, pass a signer to the token-endpoint flows:
+  `client.auth.client_credentials(..., dpop=signer)`,
+  `client.auth.token_exchange(..., dpop=signer)` and
+  `client.mcp.get_token(..., dpop=signer)`.
+
+DPoP needs the `cryptography` package: `pip install "lumoauth[dpop]"`.
+
+### Verify a LumoAuth token in your MCP server
+
+An MCP server, or any API, that receives a LumoAuth access token verifies it
+locally. No call to LumoAuth is needed for each request: the SDK fetches the
+organization's signing keys once and caches them.
+
+```python
+from lumoauth import verify_access_token
+
+claims = verify_access_token(token, issuer="https://app.lumoauth.dev/orgs/acme-corp/api/v1",
+                             resource="https://mcp.example.com/mcp")
+if not claims.has_scope("tools:read"): ...
+```
+
+- `issuer` is the organization issuer, `{base_url}/orgs/{org}/api/v1`. The
+  SDK reads `{issuer}/.well-known/openid-configuration` for the `jwks_uri`,
+  caches the keys, and fetches them again once when a token names an unknown
+  `kid`.
+- `resource` is your server's resource URI. The token's `aud` must contain it.
+- The checks: the signature (RS256, PS256 or ES256 against the JWKS), the
+  `typ` header (`at+jwt`), `iss`, `aud`, `exp` and `nbf` (60 seconds of
+  leeway by default), and `sub`. A test token (`token_use: "test"`) is
+  refused. `alg: none` and HMAC algorithms are refused.
+- `AccessTokenClaims` has `sub`, `scopes`, `has_scope()`, `has_scopes()`,
+  `missing_scopes()`, `is_agent`, `agent_id`, `capabilities`,
+  `has_capability()`, the delegation chain (`act`, `act_chain`, `actor`,
+  `is_delegated`), `cnf`, `is_dpop_bound`, `exp`, `nbf`, `jti`, and the raw
+  `claims` and `header` dicts.
+- Every failure raises `LumoAuthTokenError`. Its `code` is stable:
+  `TOKEN_EXPIRED`, `TOKEN_WRONG_AUDIENCE`, `TOKEN_WRONG_ISSUER`,
+  `TOKEN_WRONG_TYPE`, `TOKEN_BAD_SIGNATURE`, `TOKEN_UNKNOWN_KEY`,
+  `TOKEN_TEST_TOKEN`, `DPOP_REQUIRED`, `DPOP_KEY_MISMATCH`, `DPOP_REPLAYED`
+  and more. `www_authenticate` is a ready-made challenge for a 401 answer.
+
+**DPoP-bound tokens.** A token with `cnf.jkt` must arrive as
+`Authorization: DPoP …` with a `DPoP` proof. Pass what the request carried,
+and the verifier checks the proof: its key matches `cnf.jkt`, its `htm` and
+`htu` match the request, its `ath` matches the token, its `iat` is recent,
+and its `jti` was not seen before (a process-local replay cache with a
+300-second window; pass `replay_cache=` with a `check_and_add(key, ttl)`
+method to share one between workers).
+
+```python
+from lumoauth import DpopRequest, verify_access_token
+
+claims = verify_access_token(
+    token,
+    issuer=issuer,
+    resource="https://mcp.example.com/mcp",
+    dpop=DpopRequest(method=request.method, url=str(request.url),
+                     proof=request.headers.get("DPoP"), scheme=scheme),   # scheme: "Bearer" or "DPoP"
+    require_dpop=True,      # refuse tokens that are not DPoP-bound
+)
+```
+
+Hold an `AccessTokenVerifier(issuer, resource, ...)` yourself to control the
+JWKS cache (`jwks=` for pinned keys, `fetch=` for your own HTTP) and the replay
+cache. The module-level function keeps one verifier per issuer and resource.
+
+**FastAPI.** `require_access_token()` does all of this as a dependency. It
+reads the `Authorization` and `DPoP` headers, answers 401 with a
+`WWW-Authenticate` challenge or 403 `insufficient_scope`, and returns the
+claims:
+
+```python
+from fastapi import Depends, FastAPI
+from lumoauth.fastapi import require_access_token, AccessTokenClaims
+
+app = FastAPI()
+auth = require_access_token(issuer="https://app.lumoauth.dev/orgs/acme-corp/api/v1",
+                            resource="https://mcp.example.com/mcp")
+
+@app.post("/mcp")
+def mcp(claims: AccessTokenClaims = Depends(auth)):
+    return {"sub": claims.sub}
+```
+
+Behind a reverse proxy, pass `request_url=` to rebuild the public URL that
+the client signed into the proof. Verification needs the `cryptography`
+package: `pip install "lumoauth[verify]"`.
 
 ### AAuth cryptographic identity
 
@@ -1067,6 +1209,7 @@ LumoAuthError                        .message, .code
 │   ├── LumoAuthNotFoundError        404: the resource does not exist
 │   └── LumoAuthRateLimitError       429: too many requests; .retry_after (seconds)
 ├── LumoAuthValidationError          bad input, or a response of the wrong shape; .issues
+│   └── LumoAuthTokenError           an access token or DPoP proof failed local verification; .code says why
 ├── LumoAuthConfigError              missing or invalid configuration
 ├── LumoAuthNetworkError             no HTTP response (DNS, TLS, timeout)
 ├── LumoAuthApprovalDeniedError      a person denied an approval
@@ -1130,8 +1273,8 @@ LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
 | `authorization_url(*, client_id, redirect_uri, scope="openid profile email", state=None, response_type="code", code_challenge=None, code_challenge_method=None, prompt=None, access_type=None, extra=None)` | Builds the URL for the authorization-code flow | none (no request) |
 | `exchange_code(code, redirect_uri, *, client_id, client_secret=None, code_verifier=None)` | Exchanges an authorization code for tokens | form body |
 | `refresh_token(refresh_token, *, client_id, client_secret=None, scopes=None)` | Refreshes an access token | form body |
-| `client_credentials(client_id, client_secret, scopes=None)` | Client-credentials grant | form body |
-| `token_exchange(subject_token, *, actor_token=None, audience=None, scopes=None, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE, resource=None)` | RFC 8693 token exchange; `resource` becomes `aud` | form body |
+| `client_credentials(client_id, client_secret, scopes=None, dpop=None)` | Client-credentials grant; `dpop` (a `DpopProofSigner`) makes the token DPoP-bound | form body |
+| `token_exchange(subject_token, *, actor_token=None, audience=None, scopes=None, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE, resource=None, dpop=None)` | RFC 8693 token exchange; `resource` becomes `aud`; `dpop` binds the new token | form body |
 | `revoke(token, *, token_type_hint=None, client_id=None, client_secret=None)` | Revokes an access or refresh token | form body |
 | `userinfo(access_token=None)` | OpenID Connect UserInfo | bearer token |
 
@@ -1221,7 +1364,8 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 
 | Member | What it does |
 |---|---|
-| `mcp.get_token(server_id, *, subject_token=None)` | Token exchange for an MCP server, with `server_id` (its https URL) as `resource`; returns the token string |
+| `mcp.get_token(server_id, *, subject_token=None, dpop=None)` | Token exchange for an MCP server, with `server_id` (its https URL) as `resource`; returns the token string; `dpop` makes it DPoP-bound |
+| `mcp.exchange(server_id, *, subject_token=None, dpop=None)` | The same exchange; returns `McpToken(access_token, token_type, expires_in, scope, resource)` whose `headers(method, url)` builds the request headers |
 | `mcp.authorize_tool(server_id, subject_type, subject_id, tool)` | Per-tool check for an MCP server, made with the server's own `mcp:authorize` token; returns `McpToolDecision`, with `allowed=False` for a deny |
 | `api` | The generated OpenAPI client; needs `lumoauth[api]` |
 
@@ -1229,14 +1373,16 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 
 ```python
 LumoAuthAgent(base_url=None, org_id=None, client_id=None, client_secret=None,
-              skip_cert_validation=False)
+              skip_cert_validation=False, dpop=None)
 ```
+
+`dpop` is `True` (ephemeral ES256 key), a `DpopKey` or a `DpopProofSigner`.
 
 | Member | What it does |
 |---|---|
 | `authenticate(scopes=None)` | Client-credentials sign-in; returns `True` or `False` |
 | `ensure_authenticated()` | Signs in again when the token is missing or about to expire |
-| `access_token`, `token_scopes`, `agent_info` | Current token, granted scopes and cached userinfo |
+| `access_token`, `token_type`, `token_scopes`, `agent_info` | Current token, its type (`Bearer` or `DPoP`), granted scopes and cached userinfo |
 | `get_agent_info()` | Identity, capabilities and budget from userinfo |
 | `has_capability(capability)` | `True` when the agent has the capability |
 | `get_budget_status()`, `is_budget_exhausted()` | Budget policy, and whether today's budget is used up |
@@ -1245,7 +1391,9 @@ LumoAuthAgent(base_url=None, org_id=None, client_id=None, client_secret=None,
 | `authorize_mcp_tool(server_id, tool)` | Asks whether this agent may run a tool on a registered MCP server; returns `AgentMcpToolDecision` |
 | `api_request(method, endpoint, *, data=None, json=None, params=None, timeout=30)` | Authenticated request; returns `requests.Response` |
 | `register(name, description=None, capabilities=None, jwks_uri=None)` | Creates or updates the agent record |
-| `get_mcp_token(mcp_server_id)` | MCP token bound to the server's https URL, or `None` when the exchange fails |
+| `get_mcp_token(mcp_server_id)` | MCP token bound to the server's https URL, or `None` when the exchange fails; DPoP-bound when the agent has `dpop` |
+| `get_mcp_credential(mcp_server_id)` | The same exchange as an `McpToken` (`token_type`, `expires_in`, `headers(method, url)`); raises on failure |
+| `dpop`, `dpop_headers(method, url, *, access_token=None)`, `dpop_proof(method, url, *, access_token=None)` | The agent's `DpopProofSigner`; `Authorization: DPoP` plus a `DPoP` proof for one request; a bare proof |
 | `jit`, `delegation`, `mcp`, `approvals` | The same namespaces as on `LumoAuth`, with the agent's token |
 
 ### `JITContext`
@@ -1304,6 +1452,29 @@ AAuthClient(agent_identifier, private_key_pem, *, base_url=None, org_id=None,
 `request_authorization()` raises `LumoAuthValidationError` without an
 `agent_token`.
 
+### `lumoauth.dpop`
+
+| Name | What it does |
+|---|---|
+| `DpopKey.generate(alg="ES256")` | New P-256 (`ES256`), P-384, P-521 or Ed25519 (`EdDSA`) key |
+| `DpopKey.from_pem(pem, password=None)`, `to_pem()` | Load and store the private key |
+| `DpopKey.alg`, `public_jwk`, `thumbprint` | The JWS algorithm, the public JWK and its RFC 7638 thumbprint |
+| `DpopProofSigner(key=None)` | Signs proofs; without a key it generates one |
+| `create_proof(method, url, *, access_token=None, nonce=None)` | One `dpop+jwt` proof: `jti`, `htm`, `htu`, `iat`, `ath` with a token, `nonce` |
+| `headers(method, url, access_token=None)` | `{"DPoP": proof}` plus `Authorization: DPoP …` with a token |
+| `remember_nonce(url, nonce)`, `nonce_for(url)`, `observe_response(url, headers)` | Nonce memory per origin |
+
+### `lumoauth.verify`
+
+| Name | What it does |
+|---|---|
+| `verify_access_token(token, *, issuer, resource, jwks=None, fetch=None, clock_skew=60, require_dpop=False, dpop=None, replay_cache=None, now=None)` | Verifies a LumoAuth access token; returns `AccessTokenClaims` or raises `LumoAuthTokenError` |
+| `AccessTokenVerifier(issuer, resource, *, jwks=None, fetch=None, jwks_uri=None, clock_skew=60, require_dpop=False, replay_cache=None, proof_max_age=300)` | A verifier with its own JWKS and replay caches; `verify(token, *, dpop=None)` |
+| `AccessTokenClaims` | `sub`, `iss`, `aud`, `exp`, `nbf`, `jti`, `scopes`, `scope`, `has_scope()`, `has_scopes()`, `missing_scopes()`, `is_agent`, `agent_id`, `capabilities`, `has_capability()`, `act`, `act_chain`, `actor`, `is_delegated`, `cnf`, `dpop_thumbprint`, `is_dpop_bound`, `token_use`, `claims`, `header` |
+| `DpopRequest(method, url, proof, scheme="DPoP", nonce=None)` | What the incoming request carried, for the DPoP check |
+| `InMemoryReplayCache`, `ReplayCache` | The default `jti` cache, and the protocol (`check_and_add(key, ttl) -> bool`) for your own |
+| `JwksCache(issuer, *, jwks=None, fetch=None, jwks_uri=None, ttl=3600)` | Discovery plus JWKS cache with one refetch on an unknown `kid` |
+
 ### Helpers
 
 | Name | What it does |
@@ -1319,6 +1490,8 @@ AAuthClient(agent_identifier, private_key_pem, *, base_url=None, org_id=None,
 | `lumo_auth_router(*, base_url, organization, client_id, client_secret=None, callback_path="/auth/callback", scope="openid profile email", post_login_redirect="/", post_logout_redirect="/")` | Router with `/login`, `/callback` and `/logout` |
 | `get_current_user(request)` | Dependency that returns `User` or `None` |
 | `require_auth(scopes=None)` | Dependency factory that answers 401 or 403 |
+| `require_access_token(*, issuer, resource, scopes=None, require_dpop=False, verifier=None, jwks=None, fetch=None, clock_skew=60, replay_cache=None, request_url=None)` | Dependency factory for resource servers: verifies the incoming LumoAuth token (and its DPoP proof) and returns `AccessTokenClaims`; answers 401 with `WWW-Authenticate` or 403 `insufficient_scope` |
+| `parse_authorization(value)` | Splits an `Authorization` header into `("Bearer" or "DPoP", token)` |
 | `User` | Pydantic model of the signed-in user |
 | `LumoAuthFastAPI` | Configuration container |
 
@@ -1376,6 +1549,25 @@ They are skipped when neither exists.
 
 ### Unreleased
 
+- New: DPoP (RFC 9449). `LumoAuthAgent(dpop=True)` or `dpop=DpopKey.from_pem(...)`
+  binds the agent's token, its MCP token exchanges and its API requests to
+  a key the agent holds. `lumoauth.dpop` has `DpopKey` and
+  `DpopProofSigner`. `client.auth.client_credentials()`,
+  `token_exchange()`, `refresh_token()`, `exchange_code()` and
+  `client.mcp.get_token()` take `dpop=`. A `use_dpop_nonce` answer is
+  retried once, and the latest nonce is kept per origin. New
+  `agent.get_mcp_credential()` and `client.mcp.exchange()` return an
+  `McpToken` with `token_type` and `headers(method, url)`; new
+  `agent.token_type`, `agent.dpop_headers()` and `agent.dpop_proof()`.
+- New: local verification of LumoAuth access tokens for MCP and API
+  servers. `verify_access_token()` and `AccessTokenVerifier` in
+  `lumoauth.verify` check the signature against the organization JWKS
+  (found through the issuer's discovery document), `typ`, `iss`, `aud`,
+  `exp`, `nbf`, refuse test tokens, and check the DPoP proof of a bound
+  token (`cnf.jkt`, `htm`/`htu`/`ath`/`iat`, replayed `jti`). They raise
+  the new `LumoAuthTokenError` with a stable `code`. New FastAPI dependency
+  `require_access_token()`. New extras `lumoauth[dpop]` and
+  `lumoauth[verify]` (both install `cryptography`).
 - New `mcp.authorize_tool()` lets an MCP server ask whether a verified
   user or agent may run one tool. The server calls it with its own
   client-credentials token (scope `mcp:authorize`), not with the caller's

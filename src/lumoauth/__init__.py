@@ -38,6 +38,17 @@ JIT permissions (ephemeral tasks + RFC 9396)::
                                          "identifier": "report_q4.pdf"})
         if result["status"] == "approved":
             token = jit.get_token(result["request_id"])
+
+DPoP-bound tokens (RFC 9449) and verifying tokens in your MCP server::
+
+    from lumoauth import LumoAuthAgent, verify_access_token
+
+    agent = LumoAuthAgent(dpop=True)
+    cred = agent.get_mcp_credential("https://mcp.example.com/mcp")
+    headers = cred.headers("POST", "https://mcp.example.com/mcp")
+
+    claims = verify_access_token(token, issuer="https://app.lumoauth.dev/orgs/acme/api/v1",
+                                 resource="https://mcp.example.com/mcp")
 """
 
 from lumoauth.aauth import AAuthClient
@@ -46,6 +57,7 @@ from lumoauth.approval import ApprovalResult, require_approval
 from lumoauth.client import LumoAuth
 from lumoauth.decorators import require_capability
 from lumoauth.delegation import DelegationChain
+from lumoauth.dpop import DpopKey, DpopProofSigner
 from lumoauth.errors import (
     LumoAuthApiError,
     LumoAuthApprovalDeniedError,
@@ -59,11 +71,18 @@ from lumoauth.errors import (
     LumoAuthNotFoundError,
     LumoAuthPermissionDeniedError,
     LumoAuthRateLimitError,
+    LumoAuthTokenError,
     LumoAuthValidationError,
 )
 from lumoauth.jit import JITContext
 from lumoauth.resources.agents import AgentMcpToolDecision
-from lumoauth.resources.mcp import McpToolDecision
+from lumoauth.resources.mcp import McpToken, McpToolDecision
+from lumoauth.verify import (
+    AccessTokenClaims,
+    AccessTokenVerifier,
+    DpopRequest,
+    verify_access_token,
+)
 
 __all__ = [
     # Clients
@@ -77,7 +96,16 @@ __all__ = [
     "require_approval",
     "ApprovalResult",
     "McpToolDecision",
+    "McpToken",
     "AgentMcpToolDecision",
+    # DPoP (RFC 9449)
+    "DpopKey",
+    "DpopProofSigner",
+    # Access token verification (resource servers)
+    "verify_access_token",
+    "AccessTokenVerifier",
+    "AccessTokenClaims",
+    "DpopRequest",
     # Errors
     "LumoAuthError",
     "LumoAuthApiError",
@@ -86,6 +114,7 @@ __all__ = [
     "LumoAuthNotFoundError",
     "LumoAuthRateLimitError",
     "LumoAuthValidationError",
+    "LumoAuthTokenError",
     "LumoAuthConfigError",
     "LumoAuthNetworkError",
     "LumoAuthApprovalDeniedError",

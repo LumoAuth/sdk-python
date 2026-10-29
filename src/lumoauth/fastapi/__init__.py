@@ -32,6 +32,19 @@ compatible session backend that exposes ``request.session`` as a dict-like
 object). The PKCE verifier and authorization ``state`` are stashed on the
 session under ``__lumoauth.flow`` so they survive the redirect to LumoAuth
 and back without ever appearing in URLs or cookies.
+
+Resource servers (an MCP server, an API) protect routes with
+:func:`require_access_token`, which verifies the incoming LumoAuth access
+token locally, including the DPoP binding::
+
+    from lumoauth.fastapi import require_access_token, AccessTokenClaims
+
+    auth = require_access_token(issuer="https://app.lumoauth.dev/orgs/acme/api/v1",
+                                resource="https://mcp.example.com/mcp")
+
+    @app.post("/mcp")
+    def mcp(claims: AccessTokenClaims = Depends(auth)):
+        ...
 """
 
 from __future__ import annotations
@@ -43,6 +56,7 @@ from .integration import (
     get_current_user,
     require_auth,
 )
+from .resource import AccessTokenClaims, parse_authorization, require_access_token
 
 __all__ = [
     "User",
@@ -50,4 +64,7 @@ __all__ = [
     "lumo_auth_router",
     "get_current_user",
     "require_auth",
+    "require_access_token",
+    "parse_authorization",
+    "AccessTokenClaims",
 ]

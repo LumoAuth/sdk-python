@@ -9,6 +9,7 @@ Mirrors the JS SDK's error hierarchy (same names and codes):
     │   ├── LumoAuthNotFoundError         (404, code NOT_FOUND)
     │   └── LumoAuthRateLimitError        (429, code RATE_LIMITED)
     ├── LumoAuthValidationError     (bad input / unexpected response shape)
+    │   └── LumoAuthTokenError      (an access token or DPoP proof failed local verification; code names why)
     ├── LumoAuthConfigError         (missing or invalid configuration)
     ├── LumoAuthNetworkError        (transport failure: DNS, timeout, TLS, …)
     ├── LumoAuthApprovalDeniedError
@@ -38,6 +39,7 @@ __all__ = [
     "LumoAuthNotFoundError",
     "LumoAuthRateLimitError",
     "LumoAuthValidationError",
+    "LumoAuthTokenError",
     "LumoAuthConfigError",
     "LumoAuthNetworkError",
     "LumoAuthApprovalDeniedError",
@@ -151,6 +153,35 @@ class LumoAuthValidationError(LumoAuthError, ValueError):
     def __init__(self, message: str, issues: Optional[List[Any]] = None) -> None:
         super().__init__(message, "VALIDATION_ERROR")
         self.issues: List[Any] = issues or []
+
+
+class LumoAuthTokenError(LumoAuthValidationError):
+    """An access token or DPoP proof failed local verification.
+
+    Raised by :func:`lumoauth.verify.verify_access_token`. ``code`` is one of
+    the stable ``TOKEN_*`` / ``DPOP_*`` values (``TOKEN_EXPIRED``,
+    ``TOKEN_WRONG_AUDIENCE``, ``DPOP_REQUIRED``, ``DPOP_REPLAYED``, …), so a
+    resource server can log or map it without parsing the message.
+    ``www_authenticate`` is a ready-made challenge value for a 401 answer.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "TOKEN_INVALID",
+        *,
+        scheme: str = "Bearer",
+        error: str = "invalid_token",
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.scheme = scheme
+        self.error = error
+
+    @property
+    def www_authenticate(self) -> str:
+        description = self.message.replace('"', "'")
+        return f'{self.scheme} error="{self.error}", error_description="{description}"'
 
 
 class LumoAuthConfigError(LumoAuthError, ValueError, RuntimeError):

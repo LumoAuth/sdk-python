@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 from urllib.parse import urlencode
 
 from lumoauth._http import HttpClient
+
+if TYPE_CHECKING:  # pragma: no cover
+    from lumoauth.dpop import DpopProofSigner
 
 logger = logging.getLogger("lumoauth.auth")
 
@@ -84,8 +87,13 @@ class AuthResource:
         client_id: str,
         client_secret: Optional[str] = None,
         code_verifier: Optional[str] = None,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Dict[str, Any]:
-        """Exchange an authorization code for tokens."""
+        """Exchange an authorization code for tokens.
+
+        ``dpop`` signs the request with a DPoP proof (RFC 9449), so the
+        issued token is bound to that key and ``token_type`` is ``DPoP``.
+        """
         data: Dict[str, str] = {
             "grant_type": "authorization_code",
             "code": code,
@@ -96,7 +104,7 @@ class AuthResource:
             data["client_secret"] = client_secret
         if code_verifier:
             data["code_verifier"] = code_verifier
-        return self._token_request(data)
+        return self._token_request(data, dpop=dpop)
 
     def refresh_token(
         self,
@@ -105,8 +113,9 @@ class AuthResource:
         client_id: str,
         client_secret: Optional[str] = None,
         scopes: Optional[List[str]] = None,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Dict[str, Any]:
-        """Refresh an access token."""
+        """Refresh an access token. ``dpop`` binds the new token to that key."""
         data: Dict[str, str] = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -116,15 +125,21 @@ class AuthResource:
             data["client_secret"] = client_secret
         if scopes:
             data["scope"] = " ".join(scopes)
-        return self._token_request(data)
+        return self._token_request(data, dpop=dpop)
 
     def client_credentials(
         self,
         client_id: str,
         client_secret: str,
         scopes: Optional[List[str]] = None,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Dict[str, Any]:
-        """OAuth 2.0 client-credentials grant (machine-to-machine)."""
+        """OAuth 2.0 client-credentials grant (machine-to-machine).
+
+        ``dpop`` (a :class:`~lumoauth.dpop.DpopProofSigner`) sends a DPoP
+        proof, so the token is sender-constrained and ``token_type`` is
+        ``DPoP``. A ``use_dpop_nonce`` answer is retried once.
+        """
         data: Dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": client_id,
@@ -132,7 +147,7 @@ class AuthResource:
         }
         if scopes:
             data["scope"] = " ".join(scopes)
-        return self._token_request(data)
+        return self._token_request(data, dpop=dpop)
 
     def token_exchange(
         self,
@@ -144,6 +159,7 @@ class AuthResource:
         subject_token_type: str = ACCESS_TOKEN_TYPE,
         actor_token_type: str = ACCESS_TOKEN_TYPE,
         resource: Optional[str] = None,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> Dict[str, Any]:
         """RFC 8693 token exchange (delegation, MCP audience scoping).
 
@@ -156,6 +172,9 @@ class AuthResource:
         issued token's ``aud``. Without it an agent on-behalf-of
         token is bound to the acting agent's own id. ``audience`` is sent as the
         RFC 8693 parameter but LumoAuth binds ``aud`` from ``resource`` only.
+
+        ``dpop`` sends a DPoP proof with the exchange, so the issued token is
+        bound to that key (needed for MCP servers that require DPoP).
         """
         data: Dict[str, str] = {
             "grant_type": TOKEN_EXCHANGE_GRANT,
@@ -171,7 +190,7 @@ class AuthResource:
             data["resource"] = resource
         if scopes:
             data["scope"] = " ".join(scopes)
-        return self._token_request(data)
+        return self._token_request(data, dpop=dpop)
 
     def revoke(
         self,
@@ -205,7 +224,11 @@ class AuthResource:
 
     # ── Internal ──────────────────────────────────────────────────────
 
-    def _token_request(self, data: Dict[str, str]) -> Dict[str, Any]:
+    def _token_request(
+        self, data: Dict[str, str], *, dpop: Optional["DpopProofSigner"] = None
+    ) -> Dict[str, Any]:
         # Token endpoints authenticate via the form body — never inject the
-        # client's default credentials.
-        return self._http.call("oauth.token", data=data, auth=False)
+        # client's default credentials. A DPoP signer adds the proof header
+        # (htu = the token endpoint) and the HTTP layer retries once on
+        # use_dpop_nonce.
+        return self._http.call("oauth.token", data=data, auth=False, dpop=dpop)

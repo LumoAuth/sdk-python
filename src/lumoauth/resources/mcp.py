@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
 from urllib.parse import urlsplit
 
 from lumoauth._http import HttpClient
@@ -15,10 +15,14 @@ from lumoauth.errors import (
 )
 from lumoauth.resources.auth import AuthResource
 
+if TYPE_CHECKING:  # pragma: no cover
+    from lumoauth.dpop import DpopProofSigner
+
 logger = logging.getLogger("lumoauth.mcp")
 
 __all__ = [
     "McpResource",
+    "McpToken",
     "McpToolDecision",
     "McpSubjectType",
     "validate_mcp_server_id",
@@ -44,6 +48,43 @@ class McpToolDecision:
     subject_id: str
     resource_type: str
     resource_id: str
+
+
+@dataclass(frozen=True)
+class McpToken:
+    """Answer of :meth:`McpResource.exchange`: an access token for one MCP server.
+
+    ``token_type`` is ``"Bearer"`` or ``"DPoP"``. For a DPoP-bound token
+    ``dpop`` is the signer that holds the key, and :meth:`headers` builds
+    the ``Authorization`` and ``DPoP`` headers of each request.
+    """
+
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: Optional[int] = None
+    scope: Optional[str] = None
+    resource: Optional[str] = None
+    dpop: Optional["DpopProofSigner"] = field(default=None, repr=False, compare=False)
+
+    @property
+    def is_dpop(self) -> bool:
+        return self.token_type.lower() == "dpop"
+
+    def headers(self, method: str, url: str) -> Dict[str, str]:
+        """Request headers for the MCP server.
+
+        A Bearer token gives ``Authorization: Bearer …``. A DPoP token gives
+        ``Authorization: DPoP …`` plus a fresh ``DPoP`` proof for *method*
+        and *url* (with ``ath``). Call it once per request: a proof is for
+        one request only.
+        """
+        if self.is_dpop:
+            if self.dpop is None:
+                raise LumoAuthConfigError(
+                    "this MCP token is DPoP-bound but no DPoP signer is attached"
+                )
+            return self.dpop.headers(method, url, self.access_token)
+        return {"Authorization": f"Bearer {self.access_token}"}
 
 
 def _require_text(value: Any, what: str) -> None:
@@ -129,7 +170,11 @@ class McpResource:
         self._auth = AuthResource(http)
 
     def get_token(
-        self, server_id: str, *, subject_token: Optional[str] = None
+        self,
+        server_id: str,
+        *,
+        subject_token: Optional[str] = None,
+        dpop: Optional["DpopProofSigner"] = None,
     ) -> str:
         """Exchange a token for one bound to a secured MCP server.
 
@@ -139,14 +184,18 @@ class McpResource:
         LumoAuth ignores. Pass the server's registered Resource URI.
 
         The token works only at that MCP server. LumoAuth's own API rejects
-        it. If the MCP server requires DPoP, you need a DPoP-bound exchange
-        instead, and this helper does not make one.
+        it. If the MCP server requires DPoP, pass a ``dpop`` signer: the
+        exchange then carries a DPoP proof and the token is bound to that
+        key. Use :meth:`exchange` to also get the ``token_type`` and the
+        request headers.
 
         Args:
             server_id: The MCP server's https URL, its RFC 8707 resource
                 identifier (e.g. ``"https://mcp.example.com/mcp"``).
             subject_token: Token to exchange.  Defaults to the client's
                 bearer token (from its ``token_provider``).
+            dpop: A :class:`~lumoauth.dpop.DpopProofSigner` for a
+                DPoP-bound exchange (RFC 9449).
 
         Returns:
             The access token string, with ``aud`` set to *server_id*.
@@ -154,6 +203,22 @@ class McpResource:
         Raises:
             LumoAuthValidationError: *server_id* is not an absolute http(s)
                 URL, or it has a fragment.
+        """
+        return self.exchange(server_id, subject_token=subject_token, dpop=dpop).access_token
+
+    def exchange(
+        self,
+        server_id: str,
+        *,
+        subject_token: Optional[str] = None,
+        dpop: Optional["DpopProofSigner"] = None,
+    ) -> McpToken:
+        """Like :meth:`get_token`, but returns the whole :class:`McpToken`.
+
+        With ``dpop`` the exchange sends a DPoP proof (``htu`` = the token
+        endpoint; a ``use_dpop_nonce`` answer is retried once). LumoAuth
+        then answers ``token_type: "DPoP"`` and the returned token's
+        :meth:`McpToken.headers` signs each request to the MCP server.
         """
         validate_mcp_server_id(server_id)
         token = subject_token
@@ -165,9 +230,20 @@ class McpResource:
                 "or pass subject_token explicitly."
             )
         response = self._auth.token_exchange(
-            token, audience=server_id, resource=server_id
+            token, audience=server_id, resource=server_id, dpop=dpop
         )
-        return response["access_token"]
+        if not isinstance(response, dict) or not isinstance(response.get("access_token"), str):
+            raise LumoAuthValidationError("unexpected token exchange response")
+        token_type = response.get("token_type") or ("DPoP" if dpop else "Bearer")
+        expires_in = response.get("expires_in")
+        return McpToken(
+            access_token=response["access_token"],
+            token_type=str(token_type),
+            expires_in=int(expires_in) if isinstance(expires_in, (int, float)) else None,
+            scope=response.get("scope") if isinstance(response.get("scope"), str) else None,
+            resource=server_id,
+            dpop=dpop if str(token_type).lower() == "dpop" else None,
+        )
 
     def authorize_tool(
         self,
