@@ -251,6 +251,8 @@ class McpResource:
         subject_type: McpSubjectType,
         subject_id: str,
         tool: str,
+        *,
+        traceparent: Optional[str] = None,
     ) -> McpToolDecision:
         """Ask whether a verified caller may run one tool on an MCP server.
 
@@ -264,10 +266,13 @@ class McpResource:
             server_id: The registered MCP server id, such as
                 ``"mcp_0123456789abcdef01234567"``. This is not the
                 resource URI.
-            subject_type: ``"user"`` or ``"agent"``.
+            subject_type: ``"user" or "agent"``.
             subject_id: The ``sub`` claim of the verified MCP token. For
                 an agent you may also pass the agent id (``agt_…``).
             tool: The tool name, at most 80 characters.
+            traceparent: Optional W3C ``traceparent`` header value to
+                correlate the authorization decision in the LumoAuth
+                audit log with the caller's distributed trace.
 
         Returns:
             :class:`McpToolDecision`. A deny returns ``allowed=False`` and
@@ -292,11 +297,13 @@ class McpResource:
         validate_tool_name(tool)
 
         payload = {"subject": {"type": subject_type, "id": subject_id}, "tool": tool}
+        headers = {"traceparent": traceparent} if traceparent else None
         try:
             body = self._http.call(
                 "mcp.authorize_tool",
                 path_params={"server_id": server_id},
                 json=payload,
+                headers=headers,
             )
         except LumoAuthPermissionDeniedError as exc:
             body = deny_body(exc)

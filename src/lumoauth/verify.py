@@ -151,6 +151,49 @@ class AccessTokenClaims:
     def is_dpop_bound(self) -> bool:
         return self.dpop_thumbprint is not None
 
+    # ── JIT / RAR & Trace context ──────────────────────────────────────
+
+    @property
+    def authorization_details(self) -> Tuple[Dict[str, Any], ...]:
+        """RFC 9396 Rich Authorization Requests details granted to this token."""
+        items: List[Dict[str, Any]] = []
+        top = self.claims.get("authorization_details")
+        if isinstance(top, list):
+            items.extend(entry for entry in top if isinstance(entry, dict))
+        perms = self.claims.get("permissions")
+        if isinstance(perms, dict):
+            nested = perms.get("authorization_details")
+            if isinstance(nested, list):
+                items.extend(entry for entry in nested if isinstance(entry, dict))
+        return tuple(items)
+
+    @property
+    def is_jit(self) -> bool:
+        """``True`` when the token is a task-bound JIT token or carries RAR details."""
+        if self.claims.get("jit") is True:
+            return True
+        perms = self.claims.get("permissions")
+        if isinstance(perms, dict) and isinstance(perms.get("jit_request_id"), str):
+            return True
+        return len(self.authorization_details) > 0
+
+    @property
+    def traceparent(self) -> Optional[str]:
+        """W3C ``traceparent`` associated with the request or token, if present."""
+        val = self.claims.get("_traceparent") or self.claims.get("traceparent")
+        return val if isinstance(val, str) and val else None
+
+    @property
+    def trace_id(self) -> Optional[str]:
+        """32-hex W3C trace ID extracted from ``traceparent`` or token claims."""
+        val = self.claims.get("_trace_id") or self.claims.get("trace_id")
+        if isinstance(val, str) and val:
+            return val
+        act = self.act
+        if isinstance(act, dict) and isinstance(act.get("trace_id"), str):
+            return act["trace_id"]
+        return None
+
 
 @dataclass(frozen=True)
 class DpopRequest:
