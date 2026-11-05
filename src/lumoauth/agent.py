@@ -18,6 +18,7 @@ from lumoauth.resources.jit import JitResource
 from lumoauth.resources.mcp import McpResource, McpToken, validate_mcp_server_id
 
 if TYPE_CHECKING:  # pragma: no cover
+    from lumoauth.client_assertion import ClientAssertionSigner
     from lumoauth.dpop import DpopKey, DpopProofSigner
 
 logger = logging.getLogger("lumoauth")
@@ -61,6 +62,9 @@ class LumoAuthAgent:
         client_secret: str | None = None,
         skip_cert_validation: bool = False,
         dpop: Union["DpopProofSigner", "DpopKey", bool, None] = None,
+        private_key: Union["ClientAssertionSigner", str, bytes, None] = None,
+        key_id: str | None = None,
+        issuer: str | None = None,
     ) -> None:
         """Initialise the agent client.
 
@@ -73,6 +77,8 @@ class LumoAuthAgent:
         ``org_id``       ``LUMOAUTH_ORG_ID``
         ``client_id``    ``AGENT_CLIENT_ID``
         ``client_secret`` ``AGENT_CLIENT_SECRET``
+        ``private_key``  ``AGENT_PRIVATE_KEY`` (PEM)
+        ``key_id``       ``AGENT_KEY_ID``
         ===============  ========================
 
         Args:
@@ -83,10 +89,22 @@ class LumoAuthAgent:
                 client-credentials token, MCP token exchanges and every
                 API request then carry a DPoP proof. Needs the
                 ``cryptography`` package (``pip install "lumoauth[dpop]"``).
+            private_key: For an agent registered with the **Private key JWT**
+                identity type: its PEM private key, or a ready
+                :class:`~lumoauth.ClientAssertionSigner`. The agent then
+                authenticates with a signed client assertion (RFC 7523)
+                instead of a secret, so ``client_secret`` is not needed.
+                Needs the ``cryptography`` package.
+            key_id: The ``kid`` of the registered public key, used with a PEM
+                ``private_key``. Required when the agent has several keys.
+            issuer: The organization's issuer identifier, the assertion's
+                ``aud``. Defaults to ``{base_url}/orgs/{org_id}/api/v1``;
+                set it on a custom domain.
 
         Raises:
-            LumoAuthConfigError: If ``client_id`` or ``client_secret`` cannot
-                be resolved (subclasses ``ValueError`` for compatibility).
+            LumoAuthConfigError: If ``client_id``, or both ``client_secret``
+                and ``private_key``, cannot be resolved (subclasses
+                ``ValueError`` for compatibility).
         """
         self.base_url: str = (
             base_url or os.environ.get("LUMOAUTH_URL", "https://app.lumoauth.dev")
@@ -96,11 +114,25 @@ class LumoAuthAgent:
         )
         self.client_id: str = client_id or os.environ.get("AGENT_CLIENT_ID", "")
         self.client_secret: str = client_secret or os.environ.get("AGENT_CLIENT_SECRET", "")
+        self.client_assertion_signer: "ClientAssertionSigner | None" = _coerce_assertion_signer(
+            private_key if private_key is not None else os.environ.get("AGENT_PRIVATE_KEY") or None,
+            key_id or os.environ.get("AGENT_KEY_ID") or None,
+        )
+        self.issuer: str | None = issuer
+        if self.client_assertion_signer is not None and client_secret is None:
+            # A private_key_jwt agent has no secret; an AGENT_CLIENT_SECRET
+            # left in the environment must not turn into a second method.
+            self.client_secret = ""
 
-        if not self.client_id or not self.client_secret:
+        if not self.client_id or (not self.client_secret and self.client_assertion_signer is None):
             raise LumoAuthConfigError(
                 "Agent credentials required. Set AGENT_CLIENT_ID and AGENT_CLIENT_SECRET "
-                "environment variables or pass client_id/client_secret to the constructor."
+                "(or AGENT_PRIVATE_KEY for a private key JWT agent), or pass client_id with "
+                "client_secret or private_key to the constructor."
+            )
+        if self.client_secret and self.client_assertion_signer is not None:
+            raise LumoAuthConfigError(
+                "Pass client_secret or private_key, not both: an agent authenticates with one method."
             )
 
         # TLS verification (set to False only for local / dev environments)
@@ -193,9 +225,17 @@ class LumoAuthAgent:
         )
 
         try:
-            body = self._client.auth.client_credentials(
-                self.client_id, self.client_secret, scopes=scopes, dpop=self.dpop
-            )
+            if self.client_assertion_signer is not None:
+                body = self._client.auth.client_credentials(
+                    self.client_id,
+                    scopes=scopes,
+                    dpop=self.dpop,
+                    client_assertion=self.client_assertion(),
+                )
+            else:
+                body = self._client.auth.client_credentials(
+                    self.client_id, self.client_secret, scopes=scopes, dpop=self.dpop
+                )
         except LumoAuthApiError as exc:
             logger.error("Authentication failed: HTTP %s — %s", exc.status_code, exc)
             return False
@@ -556,6 +596,27 @@ class LumoAuthAgent:
     # DPoP helpers (RFC 9449)
     # =========================================================================
 
+    def client_assertion(self) -> str:
+        """A new ``private_key_jwt`` client assertion for this agent (single-use).
+
+        Its ``aud`` is :attr:`issuer`, or ``{base_url}/orgs/{org_id}/api/v1``.
+
+        Raises:
+            LumoAuthConfigError: The agent was created without ``private_key``.
+        """
+        if self.client_assertion_signer is None:
+            raise LumoAuthConfigError(
+                "This agent signs no client assertions: create it with private_key=..."
+            )
+        from lumoauth.client_assertion import issuer_for
+
+        if not self.issuer and not self.org_id:
+            raise LumoAuthConfigError(
+                "org_id (LUMOAUTH_ORG_ID) or issuer is needed to address a client assertion"
+            )
+        audience = self.issuer or issuer_for(self.base_url, self.org_id)
+        return self.client_assertion_signer.create(self.client_id, audience)
+
     def dpop_proof(self, method: str, url: str, *, access_token: str | None = None) -> str:
         """A DPoP proof JWT for one request (``htm``/``htu``, plus ``ath`` with a token).
 
@@ -604,6 +665,23 @@ class LumoAuthAgent:
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"{self._token_type} {self._access_token}"}
+
+
+def _coerce_assertion_signer(
+    private_key: Union["ClientAssertionSigner", str, bytes, None], key_id: Optional[str]
+) -> "ClientAssertionSigner | None":
+    if private_key is None or private_key == "":
+        return None
+    from lumoauth.client_assertion import ClientAssertionSigner
+
+    if isinstance(private_key, ClientAssertionSigner):
+        return private_key
+    if isinstance(private_key, (str, bytes)):
+        return ClientAssertionSigner.from_pem(private_key, key_id=key_id)
+    raise LumoAuthConfigError(
+        "private_key must be a PEM string or a ClientAssertionSigner, "
+        f"not {type(private_key).__name__}"
+    )
 
 
 def _coerce_dpop(

@@ -979,6 +979,35 @@ server id must name an active MCP server. Otherwise the call raises
 does the same on a `LumoAuth` client that holds an agent token or an
 `agk_` key.
 
+### Private key JWT: sign in without a secret
+
+An agent registered with the **Private key JWT** identity type has no client
+secret. Whenever it needs a token, it signs a short-lived JWT (a client
+assertion, [RFC 7523](https://www.rfc-editor.org/rfc/rfc7523)) with its
+private key. Only the public key is registered.
+
+```python
+from lumoauth import ClientAssertionSigner, LumoAuthAgent
+
+signer = ClientAssertionSigner.generate("ES256", key_id="agent-2026-11")
+open("agent-private-key.pem", "w").write(signer.to_pem())   # keep it in your secret store
+print(signer.jwks())                                        # paste this into the agent's public keys
+
+agent = LumoAuthAgent(
+    client_id="agt_0123456789abcdef",
+    private_key=open("agent-private-key.pem").read(),        # or set AGENT_PRIVATE_KEY
+    key_id="agent-2026-11",                                  # or set AGENT_KEY_ID
+)
+agent.authenticate()
+```
+
+Every token request carries a new assertion: `iss` and `sub` are the agent ID,
+`aud` is the organization's issuer identifier (`{base_url}/orgs/{org_id}/api/v1`,
+or `issuer=` on a custom domain), `exp` is 60 seconds ahead and `jti` is random.
+`ClientAssertionSigner` signs with ES256, ES384, ES512, EdDSA, RS256 to RS512 or
+PS256 to PS512. Pass either `client_secret` or `private_key`, not both. Combine
+it with `dpop=` to also bind the tokens to a key.
+
 ### DPoP-bound tokens
 
 [DPoP](https://www.rfc-editor.org/rfc/rfc9449) (RFC 9449) binds a token to a

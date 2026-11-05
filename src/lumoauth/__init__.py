@@ -55,6 +55,7 @@ from lumoauth.aauth import AAuthClient
 from lumoauth.agent import LumoAuthAgent
 from lumoauth.approval import ApprovalResult, require_approval
 from lumoauth.client import LumoAuth
+from lumoauth.client_assertion import CLIENT_ASSERTION_TYPE, ClientAssertionSigner
 from lumoauth.decorators import require_capability
 from lumoauth.delegation import DelegationChain
 from lumoauth.dpop import DpopKey, DpopProofSigner
@@ -92,6 +93,8 @@ __all__ = [
     "JITContext",
     "AAuthClient",
     # Helpers
+    "ClientAssertionSigner",
+    "CLIENT_ASSERTION_TYPE",
     "require_capability",
     "require_approval",
     "ApprovalResult",

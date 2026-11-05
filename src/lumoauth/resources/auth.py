@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 from urllib.parse import urlencode
 
 from lumoauth._http import HttpClient
+from lumoauth.errors import LumoAuthValidationError
 
 if TYPE_CHECKING:  # pragma: no cover
     from lumoauth.dpop import DpopProofSigner
@@ -130,21 +131,39 @@ class AuthResource:
     def client_credentials(
         self,
         client_id: str,
-        client_secret: str,
+        client_secret: Optional[str] = None,
         scopes: Optional[List[str]] = None,
         dpop: Optional["DpopProofSigner"] = None,
+        *,
+        client_assertion: Optional[str] = None,
     ) -> Dict[str, Any]:
         """OAuth 2.0 client-credentials grant (machine-to-machine).
+
+        Authenticate with either ``client_secret`` or ``client_assertion``
+        (``private_key_jwt``, RFC 7523: a JWT from
+        :meth:`lumoauth.ClientAssertionSigner.create`), never both: the server
+        accepts one method per request.
 
         ``dpop`` (a :class:`~lumoauth.dpop.DpopProofSigner`) sends a DPoP
         proof, so the token is sender-constrained and ``token_type`` is
         ``DPoP``. A ``use_dpop_nonce`` answer is retried once.
         """
+        if bool(client_secret) == bool(client_assertion):
+            raise LumoAuthValidationError(
+                "pass exactly one of client_secret and client_assertion to client_credentials()"
+            )
         data: Dict[str, str] = {
             "grant_type": "client_credentials",
             "client_id": client_id,
-            "client_secret": client_secret,
         }
+        if client_assertion:
+            # Lazy import keeps `import lumoauth` free of the cryptography extra.
+            from lumoauth.client_assertion import CLIENT_ASSERTION_TYPE
+
+            data["client_assertion_type"] = CLIENT_ASSERTION_TYPE
+            data["client_assertion"] = client_assertion
+        else:
+            data["client_secret"] = str(client_secret)
         if scopes:
             data["scope"] = " ".join(scopes)
         return self._token_request(data, dpop=dpop)
