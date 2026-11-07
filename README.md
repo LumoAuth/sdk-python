@@ -528,8 +528,10 @@ print(agent.token_scopes)   # the scopes that LumoAuth granted
 #### Capabilities, budget and identity
 
 A **capability** is something that an administrator allowed the agent to do,
-such as `tool:search_web`. A **budget** limits how many tokens the agent may
-use each day.
+such as `tool:search_web`. A **budget** limits the agent's calls, model tokens
+and cost per hour, day and month. LumoAuth does not see your model calls, so
+token and cost limits count only the usage that you report with
+`report_usage()`.
 
 ```python
 info = agent.get_agent_info()      # sub, name, agent_id, capabilities, budget_policy, …
@@ -537,8 +539,11 @@ info = agent.get_agent_info()      # sub, name, agent_id, capabilities, budget_p
 if agent.has_capability("tool:search_web"):
     ...
 
-if agent.is_budget_exhausted():
-    print("Daily token budget reached")
+resp = llm.chat(messages)
+agent.report_usage(tokens=resp.usage.total_tokens, cost_usd=0.0042)
+
+if agent.is_budget_exhausted():    # any limit reached: the next Ask, token or JIT request gets 429
+    print("Budget spent")
 
 me = agent.get_identity()          # GET /agents/me
 print(me["identity"]["id"], me["capabilities"], me["workspace"])

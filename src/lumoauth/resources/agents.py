@@ -63,6 +63,26 @@ class AgentsResource:
         """Boolean shorthand for :meth:`ask`."""
         return bool(self.ask(action, context).get("allowed", False))
 
+    # ── Usage ─────────────────────────────────────────────────────────
+
+    def report_usage(self, tokens: int = 0, cost_usd: float = 0.0) -> Dict[str, Any]:
+        """Report the model tokens and cost that the agent used.
+
+        LumoAuth does not see the agent's model calls, so token and cost
+        limits count only the usage reported here. Report after each model
+        call (or batch a few). Returns ``recorded`` and ``budget`` (the same
+        shape as ``budget_policy`` in UserInfo); ``budget["exhausted"]`` means
+        that the next Ask, token or JIT request gets 429. Agent credentials
+        only.
+        """
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            raise ValueError("tokens must be a non-negative integer")
+        if isinstance(cost_usd, bool) or not isinstance(cost_usd, (int, float)) or cost_usd < 0:
+            raise ValueError("cost_usd must be a non-negative number")
+        if tokens == 0 and cost_usd == 0:
+            raise ValueError("report tokens or cost_usd greater than zero")
+        return self._http.call("agents.reportUsage", json={"tokens": tokens, "cost_usd": cost_usd})
+
     # ── Identity ──────────────────────────────────────────────────────
 
     def me(self) -> Dict[str, Any]:

@@ -332,6 +332,37 @@ class LumoAuthAgent:
             self.get_agent_info()
         return (self._agent_info or {}).get("budget_policy", {})
 
+    def report_usage(self, tokens: int = 0, cost_usd: float = 0.0) -> dict[str, Any]:
+        """Report the model tokens and cost that the agent just used.
+
+        LumoAuth does not see your model calls, so token and cost limits
+        (``max_tokens_per_day``, ``max_cost_per_month_usd``, …) count only
+        what you report. Call this after each model call, for example with
+        the ``usage`` that the model provider returned. The returned
+        ``budget`` also refreshes the cached budget, so
+        :meth:`is_budget_exhausted` reflects the report at once.
+
+        Example::
+
+            resp = llm.chat(...)
+            agent.report_usage(tokens=resp.usage.total_tokens, cost_usd=0.0042)
+            if agent.is_budget_exhausted():
+                raise RuntimeError("budget spent")
+
+        Raises:
+            ValueError: for a negative or empty report.
+            LumoAuthApiError: if the request fails (subclasses ``RuntimeError``).
+        """
+        self.ensure_authenticated()
+        try:
+            result = self._client.agents.report_usage(tokens=tokens, cost_usd=cost_usd)
+        except LumoAuthApiError as exc:
+            _reraise_with_prefix(exc, "Usage report failed")
+        budget = result.get("budget")
+        if isinstance(budget, dict) and self._agent_info is not None:
+            self._agent_info["budget_policy"] = budget
+        return result
+
     def is_budget_exhausted(self) -> bool:
         """Return ``True`` if the agent's budget is spent.
 
