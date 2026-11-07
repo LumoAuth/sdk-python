@@ -14,7 +14,9 @@ def require_capability(capability: str) -> Callable[[F], F]:
     """Decorator that gates a method on an agent capability.
 
     The decorated method's first positional argument (``self``) must be a
-    :class:`~lumoauth.LumoAuthAgent` (or subclass) instance.
+    :class:`~lumoauth.LumoAuthAgent` (or subclass) instance. The check uses
+    :meth:`~lumoauth.LumoAuthAgent.has_capability`, so names match as on the
+    server: any spelling of the name, and wildcards such as ``tool.*``.
 
     Raises:
         PermissionError: If the agent does not possess *capability*.

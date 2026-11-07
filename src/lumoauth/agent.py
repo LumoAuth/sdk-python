@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import requests
 
+from lumoauth.capabilities import any_capability_covers
 from lumoauth.client import LumoAuth
 from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError
 from lumoauth.resources.agents import AgentMcpToolDecision
@@ -303,14 +304,21 @@ class LumoAuthAgent:
     def has_capability(self, capability: str) -> bool:
         """Check whether the agent has a specific capability.
 
-        Lazily fetches agent info on the first call.
+        Lazily fetches agent info on the first call. Names match as on the
+        server: ``"read:documents"`` matches the stored ``read.documents``,
+        and a held ``read.*`` covers ``read.documents``
+        (see :func:`lumoauth.capability_covers`).
+
+        This checks only the agent's registered capabilities. The Ask API
+        (:meth:`ask`) also applies your policies and the token's scope.
 
         Args:
             capability: Capability string (e.g. ``"read:documents"``).
         """
         if self._agent_info is None:
             self.get_agent_info()
-        return capability in (self._agent_info or {}).get("capabilities", [])
+        held = (self._agent_info or {}).get("capabilities") or []
+        return isinstance(held, list) and any_capability_covers(held, capability)
 
     def get_budget_status(self) -> dict[str, Any]:
         """Return the agent's current budget status.
@@ -325,10 +333,21 @@ class LumoAuthAgent:
         return (self._agent_info or {}).get("budget_policy", {})
 
     def is_budget_exhausted(self) -> bool:
-        """Return ``True`` if the daily token budget has been reached."""
+        """Return ``True`` if the agent's budget is spent.
+
+        The server reports ``exhausted`` in ``budget_policy``: true when any
+        limit (calls, tokens or cost, per hour, day or month) is reached, so
+        the next metered call would get ``429``. Without that field (older
+        servers), the daily token cap is compared with today's usage.
+        Uses the cached agent info; call :meth:`get_agent_info` for a live
+        reading.
+        """
         budget = self.get_budget_status()
         if not budget:
             return False
+        reported = budget.get("exhausted")
+        if isinstance(reported, bool):
+            return reported
         return budget.get("tokens_used_today", 0) >= budget.get(
             "max_tokens_per_day", float("inf")
         )

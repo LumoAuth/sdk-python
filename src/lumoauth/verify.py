@@ -37,6 +37,7 @@ from lumoauth._jose import (
     split_jws,
     verify as verify_signature,
 )
+from lumoauth.capabilities import any_capability_covers
 from lumoauth.dpop import DPOP_SCHEME, access_token_hash, canonical_htu
 from lumoauth.errors import (
     LumoAuthApiError,
@@ -107,7 +108,13 @@ class AccessTokenClaims:
         return [s for s in scopes if s not in self.scopes]
 
     def has_capability(self, capability: str) -> bool:
-        return capability in self.capabilities
+        """Whether the agent's ``capabilities`` claim covers *capability*.
+
+        Names match as on the server (``tool:search_web`` matches
+        ``tool.search_web``; ``invoices.*`` covers ``invoices.read``). Scopes
+        are different: :meth:`has_scope` compares them exactly.
+        """
+        return any_capability_covers(self.capabilities, capability)
 
     # ── identity ───────────────────────────────────────────────────────
 

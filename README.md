@@ -547,6 +547,15 @@ print(me["identity"]["id"], me["capabilities"], me["workspace"])
 `get_agent_info()` reads the userinfo endpoint and caches the result.
 `has_capability()` and `get_budget_status()` use that cache.
 
+`has_capability()` matches names the way the server does. LumoAuth stores
+capabilities in lower case with `.` between the parts, so `"tool:search_web"`
+matches the stored `tool.search_web`. A held wildcard such as `tool.*` covers
+`tool.search_web`, but not `tool` itself. The same rules are available as
+`normalize_capability()`, `capability_covers()` and `any_capability_covers()`,
+and `AccessTokenClaims.has_capability()` uses them for a verified token. The
+check reads only the agent's registered list. `ask()` also applies your
+policies and the token's scope.
+
 #### Ask before you act
 
 The Ask API answers the question "may I do this?" for one action. Call it

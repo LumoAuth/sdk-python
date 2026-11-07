@@ -54,6 +54,11 @@ DPoP-bound tokens (RFC 9449) and verifying tokens in your MCP server::
 from lumoauth.aauth import AAuthClient
 from lumoauth.agent import LumoAuthAgent
 from lumoauth.approval import ApprovalResult, require_approval
+from lumoauth.capabilities import (
+    any_capability_covers,
+    capability_covers,
+    normalize_capability,
+)
 from lumoauth.client import LumoAuth
 from lumoauth.client_assertion import CLIENT_ASSERTION_TYPE, ClientAssertionSigner
 from lumoauth.decorators import require_capability
@@ -96,6 +101,9 @@ __all__ = [
     "ClientAssertionSigner",
     "CLIENT_ASSERTION_TYPE",
     "require_capability",
+    "normalize_capability",
+    "capability_covers",
+    "any_capability_covers",
     "require_approval",
     "ApprovalResult",
     "McpToolDecision",
