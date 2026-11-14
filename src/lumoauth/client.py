@@ -34,7 +34,7 @@ class LumoAuth:
 
         from lumoauth import LumoAuth
 
-        client = LumoAuth(api_key="lk_…", org_id="acme-corp")
+        client = LumoAuth(api_key="lmk_…", org_id="acme-corp")
 
         if client.permissions.check("document.edit"):
             ...

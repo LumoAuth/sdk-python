@@ -4,7 +4,7 @@ General-purpose client (RBAC / ReBAC / ABAC / agents / JIT / delegation)::
 
     from lumoauth import LumoAuth
 
-    client = LumoAuth(api_key="lk_…", org_id="acme-corp")
+    client = LumoAuth(api_key="lmk_…", org_id="acme-corp")
     if client.permissions.check("document.edit"):
         ...
     allowed = client.zanzibar.is_viewer("document:readme", "user:bob")

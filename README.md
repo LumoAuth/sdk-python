@@ -1170,7 +1170,9 @@ private_pem, jwks = AAuthClient.generate_keypair()   # the JWKS key ID is "key-1
 ```
 
 **2. Create a client and request tokens.** You need a resource token from the
-target resource, and an agent token.
+target resource, and an agent token. The scope of the auth token comes from
+the resource token: LumoAuth ignores the `scope` argument of
+`request_authorization()`.
 
 ```python
 client = AAuthClient(
@@ -1206,8 +1208,10 @@ resp = client.signed_request(
 )
 ```
 
-**4. Refresh.** A refresh needs a fresh resource token for the target
-resource. LumoAuth does not rotate the refresh token.
+**4. Refresh.** A refresh needs a resource token from the same resource as
+the original grant. LumoAuth does not rotate the refresh token. The optional
+`scope` argument only narrows: a scope outside the grant is refused with
+`invalid_scope`.
 
 ```python
 new_tokens = client.refresh(tokens["refresh_token"], fresh_resource_tok, agent_token=agent_tok)
@@ -1218,8 +1222,9 @@ new_tokens = client.refresh(tokens["refresh_token"], fresh_resource_tok, agent_t
 metadata documents.
 
 The Python SDK signs AAuth requests and obtains tokens. It does not verify
-AAuth tokens on the resource side. It also does not wrap the consent route,
-the agent metadata document, the issuer JWKS or token revocation.
+AAuth tokens on the resource side. It also does not wrap the `exchange`
+request type, the consent route, the agent metadata document, the issuer JWKS
+or token revocation.
 
 ### The generated API client
 
@@ -1488,12 +1493,14 @@ AAuthClient(agent_identifier, private_key_pem, *, base_url=None, org_id=None,
 | `sign_request(method, url, *, body=None, content_type="application/json", agent_token=None, authorization="", signature_key="")` | Returns RFC 9421 signature headers |
 | `request_authorization(resource_token, scope, *, agent_token=None, redirect_uri=None, timeout=30)` | Tokens, or `{"authorization_required": True, "auth_url": …, "request_token": …}` |
 | `exchange_code(code, redirect_uri, *, agent_token, timeout=30)` | Redeems a consent code |
-| `refresh(refresh_token, resource_token, *, scope=None, agent_token, timeout=30)` | Refreshes with a fresh resource token |
+| `refresh(refresh_token, resource_token, *, scope=None, agent_token, timeout=30)` | Refreshes with a resource token from the same resource. `scope` only narrows |
 | `signed_request(method, url, *, auth_token, data=None, timeout=30)` | Signed request with a Bearer token |
 | `discover_issuer()`, `discover_resource(resource_url)` | Fetch `.well-known` metadata |
 
 `request_authorization()` raises `LumoAuthValidationError` without an
-`agent_token`.
+`agent_token`. LumoAuth ignores its `scope` argument: the resource token names
+the scope. `sign_request()` does not cover `@query`, so sign only URLs without
+a query string.
 
 ### `lumoauth.dpop`
 

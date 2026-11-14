@@ -193,3 +193,62 @@ class TestRefresh:
             post.return_value = _mock_response(400, {"error": "invalid_request"})
             with pytest.raises(RuntimeError, match="refresh failed"):
                 client.refresh("refresh-tok", "resource.jwt", agent_token=AGENT_TOKEN)
+
+
+# =============================================================================
+# request_authorization — request_type=auth
+# =============================================================================
+
+
+class TestRequestAuthorization:
+    def test_consent_is_a_200_with_request_token_and_authorization_uri(self, client: AAuthClient) -> None:
+        """The server asks for consent with 200, not 401: the response has a
+        request token and the consent page address, and no auth token."""
+        consent = {
+            "request_type": "auth",
+            "request_token": "req-tok",
+            "authorization_uri": "https://auth.example.com/orgs/acme-corp/portal/aauth/authorize?request_token=req-tok",
+            "expires_in": 600,
+        }
+        with mock.patch("lumoauth.aauth.requests.post") as post:
+            post.return_value = _mock_response(200, consent)
+            result = client.request_authorization(
+                "resource.jwt", "read", agent_token=AGENT_TOKEN,
+                redirect_uri="https://my-agent.example.com/callback",
+            )
+
+        assert result["authorization_required"] is True
+        assert result["auth_url"] == consent["authorization_uri"]
+        assert result["request_token"] == "req-tok"
+
+    def test_token_response_is_returned_unchanged(self, client: AAuthClient) -> None:
+        token = {"request_type": "auth", "auth_token": "auth.jwt", "token_type": "auth+jwt", "expires_in": 3600}
+        with mock.patch("lumoauth.aauth.requests.post") as post:
+            post.return_value = _mock_response(200, token)
+            result = client.request_authorization("resource.jwt", "read", agent_token=AGENT_TOKEN)
+
+        assert result == token
+        assert "authorization_required" not in result
+
+    def test_authentication_failure_is_an_error_not_a_consent_request(self, client: AAuthClient) -> None:
+        """A 401 means that the agent token or the signature was refused."""
+        challenge = {"error": "authentication_required", "error_description": "Invalid agent token"}
+        with mock.patch("lumoauth.aauth.requests.post") as post:
+            post.return_value = _mock_response(401, challenge)
+            with pytest.raises(RuntimeError, match="authorization failed"):
+                client.request_authorization("resource.jwt", "read", agent_token=AGENT_TOKEN)
+
+
+# =============================================================================
+# discover_issuer
+# =============================================================================
+
+
+class TestDiscoverIssuer:
+    def test_reads_the_metadata_under_the_issuer_url(self, client: AAuthClient) -> None:
+        with mock.patch("lumoauth.aauth.requests.get") as get:
+            get.return_value = _mock_response(200, {"issuer": f"{BASE_URL}/orgs/{ORG_ID}/api/v1"})
+            client.discover_issuer()
+
+        args, _ = get.call_args
+        assert args[0] == f"{BASE_URL}/orgs/{ORG_ID}/api/v1/.well-known/aauth-issuer"
