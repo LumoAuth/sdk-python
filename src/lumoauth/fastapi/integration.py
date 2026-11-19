@@ -167,7 +167,7 @@ def require_auth(scopes: Optional[list[str]] = None) -> Callable[..., Awaitable[
     are missing one of ``scopes``::
 
         @app.get("/api/admin")
-        def admin(user: User = Depends(require_auth(scopes=["admin"]))):
+        def admin(user: User = Depends(require_auth(scopes=["admin:read"]))):
             ...
     """
 

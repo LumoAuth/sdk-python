@@ -66,7 +66,7 @@ class DelegationChain:
 
         # After user completes consent flow:
         chain.handle_consent_callback("session_1", authorization_code)
-        token = chain.exchange("session_1", scopes=["read:documents"])
+        token = chain.exchange("session_1", scopes=["documents:read"])
 
         # Make delegated API calls
         resp = chain.request("session_1", "GET", "/orgs/acme/api/v1/documents")
@@ -120,8 +120,9 @@ class DelegationChain:
         Args:
             session_id: Caller-defined identifier to correlate the consent
                 with later token-exchange calls.
-            scopes: Permissions the agent is requesting on behalf of the user
-                (e.g. ``["read:documents", "write:documents"]``).
+            scopes: Scopes the agent is requesting on behalf of the user
+                (e.g. ``["documents:read", "documents:write"]``).
+                Defaults to ``["documents:read"]``.
             state: CSRF-protection value.  Defaults to ``session:<session_id>``.
 
         Returns:
@@ -136,7 +137,7 @@ class DelegationChain:
                 "Pass it to the DelegationChain constructor."
             )
 
-        scopes = scopes or ["read:documents"]
+        scopes = scopes or ["documents:read"]
         state = state or f"session:{session_id}"
 
         url = self._resource.consent_url(
@@ -264,7 +265,8 @@ class DelegationChain:
             scopes=scopes,
             resource=resource,
             forbidden_message=(
-                "Token exchange forbidden — agent may lack 'delegate:on_behalf' capability"
+                "Token exchange forbidden — the agent may not be allowed to act on "
+                "behalf of users"
             ),
             failed_prefix="Token exchange failed",
         )

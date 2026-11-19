@@ -305,15 +305,15 @@ class LumoAuthAgent:
         """Check whether the agent has a specific capability.
 
         Lazily fetches agent info on the first call. Names match as on the
-        server: ``"read:documents"`` matches the stored ``read.documents``,
-        and a held ``read.*`` covers ``read.documents``
+        server: ``"Web.Search"`` matches the held ``web:search``,
+        and a held ``web:*`` covers ``web:search``
         (see :func:`lumoauth.capability_covers`).
 
         This checks only the agent's registered capabilities. The Ask API
         (:meth:`ask`) also applies your policies and the token's scope.
 
         Args:
-            capability: Capability string (e.g. ``"read:documents"``).
+            capability: Capability string (e.g. ``"documents:read"``).
         """
         if self._agent_info is None:
             self.get_agent_info()
@@ -395,7 +395,7 @@ class LumoAuthAgent:
         executing a tool.
 
         Args:
-            action: Permission or action slug (e.g. ``"document.read"``).
+            action: The action, written ``<resource>:<action>`` (e.g. ``"document:read"``).
             context: Optional context dict (e.g. ``{"id": "doc_99"}``).
 
         Returns:
@@ -544,7 +544,7 @@ class LumoAuthAgent:
             name: Human-readable agent name (e.g. ``"Document Analyser"``).
             description: Optional description of the agent's purpose.
             capabilities: List of capability slugs the agent declares
-                (e.g. ``["read:documents", "tool:search_web"]``).
+                (e.g. ``["documents:read", "web:search"]``).
             jwks_uri: Optional HTTPS URL to the agent's public JWKS
                 (required for AAuth / proof-of-possession flows).
 

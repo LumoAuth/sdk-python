@@ -110,8 +110,8 @@ class AccessTokenClaims:
     def has_capability(self, capability: str) -> bool:
         """Whether the agent's ``capabilities`` claim covers *capability*.
 
-        Names match as on the server (``tool:search_web`` matches
-        ``tool.search_web``; ``invoices.*`` covers ``invoices.read``). Scopes
+        Names match as on the server (``web.search`` matches
+        ``web:search``; ``invoices:*`` covers ``invoices:read``). Scopes
         are different: :meth:`has_scope` compares them exactly.
         """
         return any_capability_covers(self.capabilities, capability)

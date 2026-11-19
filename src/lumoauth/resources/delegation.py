@@ -40,11 +40,14 @@ class DelegationResource:
         scopes: Optional[List[str]] = None,
         state: Optional[str] = None,
     ) -> str:
-        """Authorization URL where a user grants the agent delegated access."""
+        """Authorization URL where a user grants the agent delegated access.
+
+        Without *scopes* it asks for ``documents:read``.
+        """
         return self._auth.authorization_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
-            scope=" ".join(scopes or ["read:documents"]),
+            scope=" ".join(scopes or ["documents:read"]),
             state=state,
             prompt="consent",
             access_type="offline",

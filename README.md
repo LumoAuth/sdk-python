@@ -111,7 +111,7 @@ from lumoauth import LumoAuthAgent
 agent = LumoAuthAgent()        # reads LUMOAUTH_* and AGENT_* environment variables
 agent.authenticate()
 
-if agent.is_allowed("document.read", context={"id": "doc_99"}):
+if agent.is_allowed("document:read", context={"id": "doc_99"}):
     resp = agent.api_request("GET", "https://api.acme.com/documents/doc_99")
     print(resp.json())
 ```
@@ -426,7 +426,7 @@ with a `token_provider`. An organization API key is not accepted there.
 For machine-to-machine calls, use the client-credentials grant:
 
 ```python
-tokens = client.auth.client_credentials("client_…", "secret", scopes=["read:documents"])
+tokens = client.auth.client_credentials("client_…", "secret", scopes=["documents:read"])
 ```
 
 ### FastAPI integration
@@ -528,7 +528,7 @@ print(agent.token_scopes)   # the scopes that LumoAuth granted
 #### Capabilities, budget and identity
 
 A **capability** is something that an administrator allowed the agent to do,
-such as `tool:search_web`. A **budget** limits the agent's calls, model tokens
+such as `web:search`. A **budget** limits the agent's calls, model tokens
 and cost per hour, day and month. LumoAuth does not see your model calls, so
 token and cost limits count only the usage that you report with
 `report_usage()`.
@@ -536,7 +536,7 @@ token and cost limits count only the usage that you report with
 ```python
 info = agent.get_agent_info()      # sub, name, agent_id, capabilities, budget_policy, …
 
-if agent.has_capability("tool:search_web"):
+if agent.has_capability("web:search"):
     ...
 
 resp = llm.chat(messages)
@@ -552,14 +552,18 @@ print(me["identity"]["id"], me["capabilities"], me["workspace"])
 `get_agent_info()` reads the userinfo endpoint and caches the result.
 `has_capability()` and `get_budget_status()` use that cache.
 
-`has_capability()` matches names the way the server does. LumoAuth stores
-capabilities in lower case with `.` between the parts, so `"tool:search_web"`
-matches the stored `tool.search_web`. A held wildcard such as `tool.*` covers
-`tool.search_web`, but not `tool` itself. The same rules are available as
-`normalize_capability()`, `capability_covers()` and `any_capability_covers()`,
-and `AccessTokenClaims.has_capability()` uses them for a verified token. The
-check reads only the agent's registered list. `ask()` also applies your
-policies and the token's scope.
+`has_capability()` matches names the way the server does. Write a capability
+as `<resource>:<action>`, such as `invoices:read`. LumoAuth refuses the dot
+form (`invoices.read`) when you register a capability or request a scope.
+The match compares ASCII letters in lower case and reads a `.` as `:` only
+when it compares, so a dotted permission slug such as `invoices.read` matches
+the held `invoices:read`. A `-` is part of a name, so `invoices-read` is a
+different capability. A held wildcard such as `invoices:*` covers
+`invoices:read`, but not `invoices` itself. The same
+rules are available as `normalize_capability()`, `capability_covers()` and
+`any_capability_covers()`, and `AccessTokenClaims.has_capability()` uses them
+for a verified token. The check reads only the agent's registered list.
+`ask()` also applies your policies and the token's scope.
 
 #### Ask before you act
 
@@ -568,8 +572,8 @@ before an LLM runs a tool. LumoAuth records the decision in the audit log
 either way.
 
 ```python
-result = agent.ask("document.read", context={"id": "doc_99"})
-# {"allowed": True, "action": "document.read", "reason": …, "decided_by": …, "audit_id": …, "context": {…}}
+result = agent.ask("document:read", context={"id": "doc_99"})
+# {"allowed": True, "action": "document:read", "reason": …, "decided_by": …, "audit_id": …, "context": {…}}
 
 def dispatch_tool(tool_name: str, args: dict):
     if not agent.is_allowed(tool_name, context=args):
@@ -601,7 +605,7 @@ capability.
 from lumoauth import LumoAuthAgent, require_capability
 
 class ResearchAgent(LumoAuthAgent):
-    @require_capability("tool:search_web")
+    @require_capability("web:search")
     def search(self, query: str) -> dict:
         return self.api_request("POST", "https://api.acme.com/search", data={"query": query}).json()
 ```
@@ -615,7 +619,7 @@ identifies the agent by the client ID of this instance.
 agent.register(
     "Research assistant",
     description="Answers questions about finance reports",
-    capabilities=["tool:search_web", "read:documents"],
+    capabilities=["web:search", "documents:read"],
     jwks_uri="https://agent.example.com/.well-known/jwks.json",   # needed for AAuth
 )
 ```
@@ -824,13 +828,13 @@ agent.authenticate()
 chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
 
 # 1. Send the user to the consent page
-url = chain.get_consent_url("session_1", scopes=["read:documents", "write:documents"])
+url = chain.get_consent_url("session_1", scopes=["documents:read", "documents:write"])
 
 # 2. Handle the callback with the authorization code
 chain.handle_consent_callback("session_1", authorization_code)
 
 # 3. Exchange for a delegated token, and use it
-token = chain.exchange("session_1", scopes=["read:documents"])
+token = chain.exchange("session_1", scopes=["documents:read"])
 resp = chain.request("session_1", "GET", "https://api.acme.com/documents/abc")
 ```
 
@@ -857,7 +861,7 @@ to a specialist agent. LumoAuth allows at most three levels.
 sub_agent = LumoAuthAgent(client_id="agt_specialist", client_secret="…")
 sub_agent.authenticate()
 
-nested = chain.delegate_to_sub_agent("session_1", sub_agent.access_token, scopes=["read:documents"])
+nested = chain.delegate_to_sub_agent("session_1", sub_agent.access_token, scopes=["documents:read"])
 
 DelegationChain.get_subject(nested)         # "user:alice"
 DelegationChain.parse_actor_chain(nested)   # ["agent:orchestrator", "agent:specialist"]
@@ -1599,6 +1603,18 @@ They are skipped when neither exists.
 
 ### Unreleased
 
+- Capability matching follows the server's `<resource>:<action>` form
+  (`invoices:read`, `invoices:*`). `normalize_capability()` now returns that
+  form, and `capability_covers()`, `any_capability_covers()`,
+  `has_capability()` and `@require_capability` honour the `prefix:*`
+  wildcard. LumoAuth refuses the dot form (`invoices.read`) when you register
+  a capability, request a scope for its API or call `agent.ask()`; the matcher
+  reads a `.` as `:` only when it compares, for example with a dotted
+  permission slug. A `-` is now part of a name: `invoices-read` no longer
+  matches `invoices:read`.
+- The default scope of `DelegationChain.get_consent_url()` and
+  `client.delegation.consent_url()` is now `documents:read` (was
+  `read:documents`), resource first like every other scope.
 - New: DPoP (RFC 9449). `LumoAuthAgent(dpop=True)` or `dpop=DpopKey.from_pem(...)`
   binds the agent's token, its MCP token exchanges and its API requests to
   a key the agent holds. `lumoauth.dpop` has `DpopKey` and

@@ -15,7 +15,7 @@ TOKEN_RESPONSE = {
     "access_token": "at-1",
     "token_type": "Bearer",
     "expires_in": 3600,
-    "scope": "read:documents tool:search_web",
+    "scope": "documents:read web:search",
 }
 
 
@@ -80,7 +80,7 @@ def test_skip_cert_validation_flag(fake_session: FakeSession):
 
 def test_authenticate_posts_client_credentials(agent, fake_session):
     fake_session.queue(FakeResponse(200, TOKEN_RESPONSE))
-    assert agent.authenticate(scopes=["read:documents"]) is True
+    assert agent.authenticate(scopes=["documents:read"]) is True
 
     method, url, kwargs = fake_session.last
     assert method == "POST"
@@ -89,13 +89,13 @@ def test_authenticate_posts_client_credentials(agent, fake_session):
         "grant_type": "client_credentials",
         "client_id": "agt_client",
         "client_secret": "agt_secret",
-        "scope": "read:documents",
+        "scope": "documents:read",
     }
     # Token endpoint must not carry default auth headers
     assert "Authorization" not in (kwargs["headers"] or {})
 
     assert agent.access_token == "at-1"
-    assert agent.token_scopes == ["read:documents", "tool:search_web"]
+    assert agent.token_scopes == ["documents:read", "web:search"]
 
 
 def test_authenticate_returns_false_on_http_error(agent, fake_session):
@@ -116,7 +116,7 @@ def test_ensure_authenticated_reuses_valid_token(agent, fake_session):
 
 def test_get_agent_info_calls_userinfo_with_bearer(agent, fake_session):
     authenticated(agent, fake_session)
-    info = {"sub": "agent:1", "name": "Doc bot", "capabilities": ["read:documents"],
+    info = {"sub": "agent:1", "name": "Doc bot", "capabilities": ["documents:read"],
             "budget_policy": {"max_tokens_per_day": 100, "tokens_used_today": 100}}
     fake_session.queue(FakeResponse(200, info))
 
@@ -127,8 +127,8 @@ def test_get_agent_info_calls_userinfo_with_bearer(agent, fake_session):
 
     # Cached info feeds capability & budget helpers with no extra requests
     calls = len(fake_session.calls)
-    assert agent.has_capability("read:documents") is True
-    assert agent.has_capability("write:documents") is False
+    assert agent.has_capability("documents:read") is True
+    assert agent.has_capability("documents:write") is False
     assert agent.get_budget_status() == info["budget_policy"]
     assert agent.is_budget_exhausted() is True
     assert len(fake_session.calls) == calls
@@ -146,21 +146,21 @@ def test_get_agent_info_failure_raises_runtime_error_compatible(agent, fake_sess
 
 def test_ask_posts_action_and_context(agent, fake_session):
     authenticated(agent, fake_session)
-    fake_session.queue(FakeResponse(200, {"allowed": True, "action": "document.read"}))
+    fake_session.queue(FakeResponse(200, {"allowed": True, "action": "document:read"}))
 
-    result = agent.ask("document.read", context={"id": "doc_99"})
+    result = agent.ask("document:read", context={"id": "doc_99"})
     assert result["allowed"] is True
 
     method, url, kwargs = fake_session.last
     assert (method, url) == ("POST", f"{BASE}/orgs/{ORG}/api/v1/agents/ask")
-    assert kwargs["json"] == {"action": "document.read", "context": {"id": "doc_99"}}
+    assert kwargs["json"] == {"action": "document:read", "context": {"id": "doc_99"}}
     assert kwargs["headers"]["Authorization"] == "Bearer at-1"
 
 
 def test_is_allowed_shorthand(agent, fake_session):
     authenticated(agent, fake_session)
     fake_session.queue(FakeResponse(200, {"allowed": False}))
-    assert agent.is_allowed("document.write") is False
+    assert agent.is_allowed("document:write") is False
 
 
 def test_get_identity_calls_agents_me(agent, fake_session):
@@ -182,7 +182,7 @@ def test_register_posts_full_payload(agent, fake_session):
     result = agent.register(
         "Doc bot",
         description="Reads documents",
-        capabilities=["read:documents"],
+        capabilities=["documents:read"],
         jwks_uri="https://bot.example.com/.well-known/jwks.json",
     )
     assert result == {"agent_id": "agt_1"}
@@ -193,7 +193,7 @@ def test_register_posts_full_payload(agent, fake_session):
         "client_id": "agt_client",
         "name": "Doc bot",
         "description": "Reads documents",
-        "capabilities": ["read:documents"],
+        "capabilities": ["documents:read"],
         "jwks_uri": "https://bot.example.com/.well-known/jwks.json",
     }
 
@@ -344,3 +344,17 @@ def test_require_approval_flow(agent, fake_session, monkeypatch):
     assert create[1] == f"{BASE}/orgs/{ORG}/api/v1/agents/me/approvals"
     status = fake_session.calls[2]
     assert status[1] == f"{BASE}/orgs/{ORG}/api/v1/agents/me/approvals/apv-1/status"
+
+
+# ── delegation consent URL ────────────────────────────────────────────
+
+
+def test_consent_url_defaults_to_documents_read(agent):
+    from urllib.parse import parse_qs, urlparse
+
+    from lumoauth import DelegationChain
+
+    chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
+    query = parse_qs(urlparse(chain.get_consent_url("session_1")).query)
+    assert query["scope"] == ["documents:read"]
+    assert query["prompt"] == ["consent"]

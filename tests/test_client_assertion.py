@@ -20,7 +20,7 @@ ORG = "acme-corp"
 ISSUER = f"{BASE}/orgs/{ORG}/api/v1"
 AGENT_ID = "agt_0123456789abcdef"
 
-TOKEN_RESPONSE = {"access_token": "at-1", "token_type": "Bearer", "expires_in": 3600, "scope": "invoices.read"}
+TOKEN_RESPONSE = {"access_token": "at-1", "token_type": "Bearer", "expires_in": 3600, "scope": "invoices:read"}
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:

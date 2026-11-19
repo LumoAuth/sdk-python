@@ -61,7 +61,7 @@ def make_token(
         "jti": "jti-1",
         "scope": "tools:read tools:write",
         "is_agent": True,
-        "capabilities": ["tool:search_web"],
+        "capabilities": ["web:search"],
     }
     body.update(claims or {})
     for name in drop:
@@ -96,7 +96,7 @@ def test_happy_path_rs256():
     assert claims.has_scope("tools:read") and not claims.has_scope("admin")
     assert claims.has_scopes("tools:read", "tools:write")
     assert claims.missing_scopes(["tools:read", "x"]) == ["x"]
-    assert claims.has_capability("tool:search_web")
+    assert claims.has_capability("web:search")
     assert claims.jti == "jti-1" and claims.exp == NOW + 600 and claims.nbf == NOW - 5
     assert not claims.is_dpop_bound and not claims.is_delegated
     assert claims.header["kid"] == "rsa-1"

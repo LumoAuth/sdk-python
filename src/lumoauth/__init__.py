@@ -17,7 +17,7 @@ Agent quick start::
     agent = LumoAuthAgent()   # reads LUMOAUTH_* / AGENT_* env vars
     agent.authenticate()
 
-    if agent.has_capability("read:documents"):
+    if agent.has_capability("documents:read"):
         resp = agent.api_request("GET", f"/orgs/{agent.org_id}/api/v1/documents/123")
 
 Delegation (Chain of Agency — RFC 8693 token exchange)::

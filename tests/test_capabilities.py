@@ -58,15 +58,19 @@ def test_contract_any_covers_cases() -> None:
 
 
 def test_inline_rules() -> None:
-    assert normalize_capability(" Tool:Search-Web ") == "tool.search.web"
-    assert normalize_capability("Ünits.Read") == "Ünits.read"  # ASCII only, as PHP strtolower
-    assert capability_covers("tool:search_web", "tool.search_web")
-    assert capability_covers("invoices.*", "invoices.read.draft")
-    assert not capability_covers("invoices.*", "invoices")
-    assert not capability_covers("*.read", "invoices.read")
+    assert normalize_capability(" Web.Search ") == "web:search"
+    assert normalize_capability("Pull-Requests:Comment") == "pull-requests:comment"  # '-' is part of a name
+    assert normalize_capability("Ünits.Read") == "Ünits:read"  # ASCII only, as PHP strtolower
+    assert capability_covers("web:search", "web.search")
+    assert capability_covers("invoices:*", "invoices:read:draft")
+    assert capability_covers("invoices.*", "invoices:read")  # '.' is read as ':' when comparing
+    assert not capability_covers("invoices:*", "invoices")
+    assert not capability_covers("invoices:read", "invoices-read")
+    assert not capability_covers("users:*", "users-delete")
+    assert not capability_covers("*:read", "invoices:read")
     assert not capability_covers("*", "")
-    assert any_capability_covers([1, None, "users.view"], "users:view")
-    assert not any_capability_covers([], "users.view")
+    assert any_capability_covers([1, None, "users:view"], "users.view")
+    assert not any_capability_covers([], "users:view")
 
 
 # ── The agent client ──────────────────────────────────────────────────
@@ -76,11 +80,11 @@ ORG = "acme"
 
 
 class Bot(LumoAuthAgent):
-    @require_capability("tool:search_web")
+    @require_capability("web:search")
     def search(self) -> str:
         return "ok"
 
-    @require_capability("tool:send_email")
+    @require_capability("email:send")
     def send(self) -> str:
         return "sent"
 
@@ -92,23 +96,24 @@ def bot(fake_session: FakeSession, monkeypatch: pytest.MonkeyPatch) -> Bot:
     b = Bot(base_url=BASE, org_id=ORG, client_id="agt_1", client_secret="s")
     fake_session.queue(FakeResponse(200, {"access_token": "at-1", "token_type": "Bearer", "expires_in": 3600}))
     assert b.authenticate() is True
-    # The server returns capabilities in their stored form.
-    fake_session.queue(FakeResponse(200, {"sub": "agent_agt_1", "capabilities": ["tool.search_web", "invoices.*"]}))
+    # The server returns capabilities in their canonical form.
+    fake_session.queue(FakeResponse(200, {"sub": "agent_agt_1", "capabilities": ["web:search", "invoices:*"]}))
     return b
 
 
 def test_has_capability_matches_like_the_server(bot: Bot) -> None:
-    assert bot.has_capability("tool:search_web") is True  # spelled as registered
-    assert bot.has_capability("tool.search_web") is True  # stored form
-    assert bot.has_capability("invoices.approve") is True  # through invoices.*
-    assert bot.has_capability("Invoices:Read:Draft") is True
+    assert bot.has_capability("web:search") is True  # canonical form
+    assert bot.has_capability("web.search") is True  # '.' is read as ':'
+    assert bot.has_capability("invoices:approve") is True  # through invoices:*
+    assert bot.has_capability("Invoices.Read.Draft") is True
     assert bot.has_capability("invoices") is False  # a wildcard never covers its prefix
-    assert bot.has_capability("tool:send_email") is False
+    assert bot.has_capability("invoices-approve") is False  # '-' is part of a name
+    assert bot.has_capability("email:send") is False
 
 
 def test_require_capability_uses_the_same_rules(bot: Bot) -> None:
     assert bot.search() == "ok"
-    with pytest.raises(PermissionError, match="tool:send_email"):
+    with pytest.raises(PermissionError, match="email:send"):
         bot.send()
 
 
@@ -136,10 +141,10 @@ def test_budget_uses_the_servers_verdict(bot: Bot, fake_session: FakeSession) ->
 def test_token_claims_match_like_the_server() -> None:
     claims = AccessTokenClaims(
         sub="agent_agt_1", iss="https://auth.example.com/orgs/acme/api/v1", aud=("https://mcp.example.com",),
-        exp=0, scopes=("invoices.read",), is_agent=True, capabilities=("tool.search_web", "invoices.*"),
+        exp=0, scopes=("invoices:read",), is_agent=True, capabilities=("web:search", "invoices:*"),
     )
-    assert claims.has_capability("tool:search_web")
-    assert claims.has_capability("invoices.approve")
-    assert not claims.has_capability("payments.read")
+    assert claims.has_capability("web.search")
+    assert claims.has_capability("invoices:approve")
+    assert not claims.has_capability("payments:read")
     # Scopes stay exact, as in OAuth.
-    assert claims.has_scope("invoices.read") and not claims.has_scope("invoices:read")
+    assert claims.has_scope("invoices:read") and not claims.has_scope("invoices.read")

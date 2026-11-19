@@ -16,7 +16,7 @@ def require_capability(capability: str) -> Callable[[F], F]:
     The decorated method's first positional argument (``self``) must be a
     :class:`~lumoauth.LumoAuthAgent` (or subclass) instance. The check uses
     :meth:`~lumoauth.LumoAuthAgent.has_capability`, so names match as on the
-    server: any spelling of the name, and wildcards such as ``tool.*``.
+    server: any spelling of the name, and wildcards such as ``web:*``.
 
     Raises:
         PermissionError: If the agent does not possess *capability*.
@@ -24,7 +24,7 @@ def require_capability(capability: str) -> Callable[[F], F]:
     Example::
 
         class MyAgent(LumoAuthAgent):
-            @require_capability("tool:search_web")
+            @require_capability("web:search")
             def search(self, query: str) -> dict:
                 return self.api_request("POST", "/search", data={"q": query}).json()
     """
