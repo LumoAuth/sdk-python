@@ -8,6 +8,7 @@ from lumoauth.resources.delegation import DelegationResource
 from lumoauth.resources.jit import JitResource
 from lumoauth.resources.mcp import McpResource
 from lumoauth.resources.permissions import PermissionsResource
+from lumoauth.resources.poppy import PoppyResource
 from lumoauth.resources.zanzibar import ZanzibarResource
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "JitResource",
     "McpResource",
     "PermissionsResource",
+    "PoppyResource",
     "ZanzibarResource",
 ]

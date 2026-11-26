@@ -39,6 +39,13 @@ JIT permissions (ephemeral tasks + RFC 9396)::
         if result["status"] == "approved":
             token = jit.get_token(result["request_id"])
 
+Requests from personal agents (Personal Agent Protocol)::
+
+    client = LumoAuth(org_id="acme-corp", client_id="…", client_secret="…")
+    who = client.poppy.verify_request(method, public_url, headers, required_scope="orders:read")
+    if not who.active:
+        ...  # answer the personal agent with who.response, unchanged
+
 DPoP-bound tokens (RFC 9449) and verifying tokens in your MCP server::
 
     from lumoauth import LumoAuthAgent, verify_access_token
@@ -83,6 +90,15 @@ from lumoauth.errors import (
 from lumoauth.jit import JITContext
 from lumoauth.resources.agents import AgentMcpToolDecision
 from lumoauth.resources.mcp import McpToken, McpToolDecision
+from lumoauth.resources.poppy import (
+    POPPY_FORWARDED_HEADERS,
+    PoppyAccount,
+    PoppyResponse,
+    PoppySessionInfo,
+    PoppySessionStatus,
+    PoppyVerification,
+    build_poppy_verify_body,
+)
 from lumoauth.verify import (
     AccessTokenClaims,
     AccessTokenVerifier,
@@ -109,6 +125,14 @@ __all__ = [
     "McpToolDecision",
     "McpToken",
     "AgentMcpToolDecision",
+    # Personal Agent Protocol: Session verification
+    "PoppyVerification",
+    "PoppySessionInfo",
+    "PoppyAccount",
+    "PoppyResponse",
+    "PoppySessionStatus",
+    "build_poppy_verify_body",
+    "POPPY_FORWARDED_HEADERS",
     # DPoP (RFC 9449)
     "DpopKey",
     "DpopProofSigner",

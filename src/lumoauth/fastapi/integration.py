@@ -11,8 +11,8 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlencode
 
 from lumoauth._http import HttpClient
-from lumoauth._routes import format_path
-from lumoauth.errors import LumoAuthApiError
+from lumoauth._routes import format_path, normalize_custom_domain
+from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError
 from lumoauth.resources.auth import AuthResource
 
 try:
@@ -59,18 +59,38 @@ class LumoAuthFastAPI:
     Most apps construct this implicitly via :func:`lumo_auth_router`, but
     you can hold a reference if you want to share the same configuration
     between the router and a custom dependency.
+
+    Pass ``base_url`` and ``organization``, or ``custom_domain`` for an
+    organization on its own domain. With ``custom_domain`` the sign-in,
+    token and userinfo addresses are on that domain and have no
+    ``/orgs/{organization}`` segment; ``base_url`` is not used and
+    ``organization`` is not needed.
     """
 
-    base_url: str
-    organization: str
-    client_id: str
+    base_url: Optional[str] = None
+    organization: Optional[str] = None
+    client_id: str = ""
     client_secret: Optional[str] = None
     callback_path: str = "/auth/callback"
     scope: str = "openid profile email"
     post_login_redirect: str = "/"
     post_logout_redirect: str = "/"
     request_timeout_seconds: float = 10.0
+    custom_domain: Optional[str] = None
     _auth: Optional[AuthResource] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # A malformed custom domain is an error now, not at the first sign-in.
+        self.custom_domain = normalize_custom_domain(self.custom_domain)
+        if not self.client_id:
+            raise LumoAuthConfigError("client_id is required")
+        if self.custom_domain is not None:
+            # A custom domain that is set wins over the base URL.
+            self.base_url = self.custom_domain
+        elif not self.base_url or not self.organization:
+            raise LumoAuthConfigError(
+                "base_url and organization are required, unless custom_domain is set"
+            )
 
     # ---- Resource wiring ------------------------------------------------
 
@@ -79,9 +99,10 @@ class LumoAuthFastAPI:
         if self._auth is None:
             self._auth = AuthResource(
                 HttpClient(
-                    self.base_url.rstrip("/"),
+                    (self.base_url or "").rstrip("/"),
                     org_id=self.organization,
                     timeout=self.request_timeout_seconds,
+                    custom_domain=self.custom_domain,
                 )
             )
         return self._auth
@@ -89,8 +110,11 @@ class LumoAuthFastAPI:
     # ---- URL helpers ----------------------------------------------------
 
     def _route_url(self, route: str) -> str:
-        _, path = format_path(route, org_id=self.organization)
-        return f"{self.base_url.rstrip('/')}{path}"
+        # lumoauth._routes holds the rule for both hosts.
+        _, path = format_path(
+            route, custom_domain=self.custom_domain is not None, org_id=self.organization
+        )
+        return f"{(self.base_url or '').rstrip('/')}{path}"
 
     def authorize_url(self) -> str:
         return self._route_url("oauth.authorize")
@@ -199,14 +223,15 @@ def require_auth(scopes: Optional[list[str]] = None) -> Callable[..., Awaitable[
 
 def lumo_auth_router(
     *,
-    base_url: str,
-    organization: str,
+    base_url: Optional[str] = None,
+    organization: Optional[str] = None,
     client_id: str,
     client_secret: Optional[str] = None,
     callback_path: str = "/auth/callback",
     scope: str = "openid profile email",
     post_login_redirect: str = "/",
     post_logout_redirect: str = "/",
+    custom_domain: Optional[str] = None,
 ) -> APIRouter:
     """Build an APIRouter with /login, /callback, /logout mounted.
 
@@ -214,6 +239,11 @@ def lumo_auth_router(
     ``callback_path`` should be the absolute path that LumoAuth will
     redirect back to (it MUST match the OAuth client's registered
     redirect URIs).
+
+    Pass ``base_url`` and ``organization``, or ``custom_domain`` for an
+    organization on its own domain (``"auth.acme.com"``). A malformed
+    ``custom_domain``, or neither form, raises
+    :class:`~lumoauth.LumoAuthConfigError` here.
     """
     cfg = LumoAuthFastAPI(
         base_url=base_url,
@@ -224,6 +254,7 @@ def lumo_auth_router(
         scope=scope,
         post_login_redirect=post_login_redirect,
         post_logout_redirect=post_logout_redirect,
+        custom_domain=custom_domain,
     )
 
     router = APIRouter()

@@ -99,6 +99,8 @@ class JITContext:
             org_id=agent.org_id,
             token_provider=self._bearer,
             verify_tls=self._verify_tls,
+            # The agent's custom domain, when it has one: same host, same paths.
+            custom_domain=getattr(agent, "custom_domain", None),
         )
         self._resource = JitResource(self._http)
         self._auth = AuthResource(self._http)

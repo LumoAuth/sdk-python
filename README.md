@@ -27,6 +27,7 @@ if client.permissions.check("document.edit"):
 - [Quick start](#quick-start)
 - [Core concepts](#core-concepts)
   - [Organization and base URL](#organization-and-base-url)
+  - [Use a custom domain](#use-a-custom-domain)
   - [Credentials](#credentials)
   - [Scopes](#scopes)
 - [Configuration](#configuration)
@@ -43,6 +44,7 @@ if client.permissions.check("document.edit"):
   - [MCP tokens](#mcp-tokens)
   - [DPoP-bound tokens](#dpop-bound-tokens)
   - [Verify a LumoAuth token in your MCP server](#verify-a-lumoauth-token-in-your-mcp-server)
+  - [Verify requests from personal agents](#verify-requests-from-personal-agents)
   - [AAuth cryptographic identity](#aauth-cryptographic-identity)
   - [The generated API client](#the-generated-api-client)
 - [Errors](#errors)
@@ -64,7 +66,7 @@ if client.permissions.check("document.edit"):
 | `aauth` | `pip install "lumoauth[aauth]"` | Ed25519 signing for AAuth (`cryptography` 41 or later) |
 | `dpop` | `pip install "lumoauth[dpop]"` | DPoP proofs (RFC 9449) for sender-constrained tokens (`cryptography` 41 or later) |
 | `verify` | `pip install "lumoauth[verify]"` | Local verification of LumoAuth access tokens in your MCP or API server (`cryptography` 41 or later) |
-| `fastapi` | `pip install "lumoauth[fastapi]"` | Login, callback and logout routes for FastAPI 0.110 or later |
+| `fastapi` | `pip install "lumoauth[fastapi]"` | Login, callback and logout routes for FastAPI 0.110 or later, and the dependencies for resource servers and for requests from personal agents |
 | `api` | `pip install "lumoauth[api]"` | The generated client for the full REST API, as `client.api` |
 
 ## Install
@@ -127,6 +129,7 @@ Not sure which class to start with? Use this table.
 | An agent that needs **short-lived access** to one resource | `JITContext` | [Just-in-Time permissions](#just-in-time-permissions) |
 | An agent that acts **for a user**, or hands work to sub-agents | `DelegationChain` | [Delegation and token exchange](#delegation-and-token-exchange) |
 | An agent with a **key pair** that signs each request | `AAuthClient` | [AAuth cryptographic identity](#aauth-cryptographic-identity) |
+| An **API that personal agents call** | `client.poppy`, `LumoAuthPoppy` | [Verify requests from personal agents](#verify-requests-from-personal-agents) |
 
 Services and web apps use `LumoAuth`. Autonomous agents use `LumoAuthAgent`.
 The other agent helpers build on `LumoAuthAgent`.
@@ -144,6 +147,107 @@ The **base URL** is the LumoAuth region that hosts your organization:
 
 - `https://app.lumoauth.dev` (the default)
 - `https://eu.app.lumoauth.dev` for the EU region
+
+An organization that serves LumoAuth on its own domain needs neither value.
+See the next section.
+
+### Use a custom domain
+
+An organization can serve LumoAuth on its own domain, for example
+`https://auth.acme.com`. Pass the domain as `custom_domain`, or set
+`LUMOAUTH_CUSTOM_DOMAIN`.
+
+```python
+from lumoauth import LumoAuth
+
+client = LumoAuth(custom_domain="auth.acme.com", api_key="lmk_…")
+
+if client.permissions.check("document.edit"):   # POST https://auth.acme.com/api/v1/authz/check
+    print("Allowed")
+
+print(client.issuer)                            # https://auth.acme.com
+```
+
+- **The organization ID is not needed.** When you pass `org_id` too, the SDK
+  never puts it in a path.
+- **Paths have no `/orgs/...` segment.** The token endpoint is
+  `/orgs/acme-corp/api/v1/oauth/token` on the platform host and
+  `/api/v1/oauth/token` on the domain. A route without that segment, such as
+  `/api/v1/authz/check`, keeps its path.
+- **The issuer is the bare domain**, `https://auth.acme.com`.
+  `client.issuer` returns it. OAuth and OpenID Connect tokens that LumoAuth
+  issues through the domain name it in `iss`, and a client assertion names
+  it in `aud`. AAuth is the one exception: see below.
+- **The custom domain wins over `base_url`.** The SDK sends no request to
+  the base URL.
+- The value is a host name or an `https://` origin. `http://` is accepted
+  only for `localhost`, `127.0.0.1` and `[::1]`. A value with a path, a
+  query, a fragment or credentials raises `LumoAuthConfigError` when you
+  create the client.
+
+Every entry point takes the option:
+
+| Entry point | With `custom_domain` |
+|---|---|
+| `LumoAuth`, and each namespace below it (`client.poppy` too) | Every call goes to the domain |
+| `LumoAuthAgent` | Sign-in, the Ask API, MCP token exchange and `api_request()` use the domain. `JITContext`, `DelegationChain` and `require_approval()` follow their agent. |
+| `AAuthClient` | The token endpoint and the issuer metadata are on the domain, and the request signature covers that URL. The AAuth issuer stays the platform address. |
+| `verify_access_token()`, `AccessTokenVerifier` | The token must name the domain as its issuer. Leave `issuer` out. |
+| `lumoauth.fastapi`: `lumo_auth_router()`, `require_access_token()` | Sign-in, token and userinfo addresses are on the domain. `LumoAuthPoppy` follows its client. |
+
+`LumoAuth`, `LumoAuthAgent` and `AAuthClient` read `LUMOAUTH_CUSTOM_DOMAIN`.
+The verification functions and the FastAPI helpers take the argument only.
+
+```python
+from lumoauth import LumoAuthAgent, verify_access_token
+
+agent = LumoAuthAgent(custom_domain="auth.acme.com")   # reads AGENT_CLIENT_ID and AGENT_CLIENT_SECRET
+agent.authenticate()                                   # POST https://auth.acme.com/api/v1/oauth/token
+
+
+def verify(token: str):
+    """In your MCP or API server: verify a token that the domain issued."""
+    return verify_access_token(token, custom_domain="auth.acme.com",
+                               resource="https://mcp.acme.com/mcp")
+```
+
+Local verification with a custom domain accepts exactly one issuer, the
+domain. A token that names the platform issuer
+(`https://app.lumoauth.dev/orgs/acme-corp/api/v1`) is refused with
+`TOKEN_WRONG_ISSUER`.
+
+**AAuth keeps the platform issuer.** LumoAuth names the AAuth issuer with
+the platform address on every host:
+`https://app.lumoauth.dev/orgs/acme-corp/api/v1`. On a custom domain
+`AAuthClient` sends its requests to the domain, but AAuth tokens still name
+the platform address in `iss`, and the agent still addresses it as the
+audience. `AAuthClient.get_issuer()` returns that issuer:
+
+```python
+from lumoauth import AAuthClient
+
+aauth = AAuthClient(
+    agent_identifier="https://my-agent.example.com",
+    private_key_pem=open("agent-key.pem").read(),
+    custom_domain="auth.acme.com",
+)
+print(aauth.get_issuer())   # https://app.lumoauth.dev/orgs/acme-corp/api/v1
+```
+
+With a custom domain, `get_issuer()` reads the `issuer` member of the issuer
+metadata document at `https://auth.acme.com/api/v1/.well-known/aauth-issuer`
+and keeps the value. The SDK never builds the AAuth issuer from the domain.
+Pass `issuer=` to `AAuthClient` to set it yourself.
+
+A raw request takes a path: `agent.api_request()` and
+`DelegationChain.request()`. On a custom domain, give the path without the
+`/orgs/...` segment. A path that carries the segment of the client's own
+organization still works when `org_id` is set, because the SDK removes that
+segment. The SDK leaves every other path unchanged.
+
+The generated client (`client.api`) also sends its requests to the domain,
+without the segment. Its methods still take an `org_id` argument. Pass any
+value: the SDK does not send it.
 
 ### Credentials
 
@@ -170,6 +274,11 @@ client = LumoAuth(org_id="acme-corp", token_provider=lambda: session["access_tok
 Token endpoint calls (`client.auth.exchange_code`, `refresh_token`,
 `client_credentials`, `token_exchange` and `revoke`) authenticate with the
 values in the form body. They never send the client's default credential.
+
+The Personal Agent Protocol calls (`client.poppy`) authenticate with HTTP
+Basic: the `client_id` and `client_secret` of a confidential application.
+They never send the client's API key or token either. See
+[Verify requests from personal agents](#verify-requests-from-personal-agents).
 
 ### Scopes
 
@@ -211,10 +320,13 @@ code can therefore keep credentials out of the source.
 | Variable | Used by | Meaning | Default |
 |---|---|---|---|
 | `LUMOAUTH_URL` | all clients | Base URL of your LumoAuth region | `https://app.lumoauth.dev` |
-| `LUMOAUTH_ORG_ID` | all clients | Organization slug | none; needed by org-scoped calls |
+| `LUMOAUTH_ORG_ID` | all clients | Organization slug | none; needed by org-scoped calls, unless a custom domain is set |
+| `LUMOAUTH_CUSTOM_DOMAIN` | all clients | The organization's own domain, such as `auth.acme.com`. It wins over `LUMOAUTH_URL`. See [Use a custom domain](#use-a-custom-domain). | none |
 | `LUMOAUTH_API_KEY` | `LumoAuth` | Organization API key, sent as `X-API-Key` | none |
 | `AGENT_CLIENT_ID` | `LumoAuthAgent` | The agent's OAuth client ID | none; required |
 | `AGENT_CLIENT_SECRET` | `LumoAuthAgent` | The agent's OAuth client secret | none; required |
+| `LUMOAUTH_CLIENT_ID` | `LumoAuth` | Client ID of a confidential application, for the `client.poppy` calls | none; needed by `client.poppy` |
+| `LUMOAUTH_CLIENT_SECRET` | `LumoAuth` | The secret of that application | none; needed by `client.poppy` |
 
 ```python
 # Explicit arguments…
@@ -230,13 +342,16 @@ client = LumoAuth()
 |---|---|---|---|
 | `api_key` | `str` | `LUMOAUTH_API_KEY` | Organization API key |
 | `base_url` | `str` | `LUMOAUTH_URL`, then `https://app.lumoauth.dev` | Base URL |
-| `org_id` | `str` | `LUMOAUTH_ORG_ID` | Organization slug |
+| `org_id` | `str` | `LUMOAUTH_ORG_ID` | Organization slug. Not needed with `custom_domain`. |
+| `custom_domain` | `str` | `LUMOAUTH_CUSTOM_DOMAIN` | The organization's own domain, as a host name or an `https://` origin. It wins over `base_url`. |
 | `token_provider` | `Callable[[], str \| None]` | none | Returns a bearer token for each request; wins over `api_key` |
 | `timeout` | `float` | `30` | Request timeout in seconds |
 | `skip_cert_validation` | `bool` | `False` | Turns off the checks of TLS certificates. Use it for local development only. |
+| `client_id` | `str` | `LUMOAUTH_CLIENT_ID` | Client ID of a confidential application. Only the `client.poppy` calls use it. |
+| `client_secret` | `str` | `LUMOAUTH_CLIENT_SECRET` | The secret of that application. Its allowed scopes must include `poppy:verify`. |
 
-`LumoAuthAgent` takes `base_url`, `org_id`, `client_id`, `client_secret` and
-`skip_cert_validation`. It raises `LumoAuthConfigError` when it cannot find a
+`LumoAuthAgent` takes `base_url`, `org_id`, `custom_domain`, `client_id`,
+`client_secret` and `skip_cert_validation`. It raises `LumoAuthConfigError` when it cannot find a
 client ID and secret.
 
 ## Guides
@@ -479,6 +594,9 @@ How it works:
 The app **must** add `SessionMiddleware`. The router keeps its state in the
 session under the key `__lumoauth`, never in URLs. Without the middleware,
 `/auth/login` answers with HTTP 500 and the error `session_middleware_missing`.
+
+For an organization on its own domain, pass `custom_domain="auth.acme.com"`
+in place of `base_url` and `organization`.
 
 `callback_path` must match a redirect URI that is registered on the OAuth
 client. Add `?return_to=/dashboard` to the login URL to choose the page that
@@ -1021,7 +1139,7 @@ agent.authenticate()
 
 Every token request carries a new assertion: `iss` and `sub` are the agent ID,
 `aud` is the organization's issuer identifier (`{base_url}/orgs/{org_id}/api/v1`,
-or `issuer=` on a custom domain), `exp` is 60 seconds ahead and `jti` is random.
+or the bare domain with `custom_domain=`), `exp` is 60 seconds ahead and `jti` is random.
 `ClientAssertionSigner` signs with ES256, ES384, ES512, EdDSA, RS256 to RS512 or
 PS256 to PS512. Pass either `client_secret` or `private_key`, not both. Combine
 it with `dpop=` to also bind the tokens to a key.
@@ -1090,6 +1208,10 @@ if not claims.has_scope("tools:read"): ...
   SDK reads `{issuer}/.well-known/openid-configuration` for the `jwks_uri`,
   caches the keys, and fetches them again once when a token names an unknown
   `kid`.
+- For an organization on its own domain, pass `custom_domain="auth.acme.com"`
+  and leave `issuer` out. The issuer is then the bare domain, and the SDK
+  reads the discovery document below `https://auth.acme.com/api/v1`. See
+  [Use a custom domain](#use-a-custom-domain).
 - `resource` is your server's resource URI. The token's `aud` must contain it.
 - The checks: the signature (RS256, PS256 or ES256 against the JWKS), the
   `typ` header (`at+jwt`), `iss`, `aud`, `exp` and `nbf` (60 seconds of
@@ -1149,9 +1271,211 @@ def mcp(claims: AccessTokenClaims = Depends(auth)):
     return {"sub": claims.sub}
 ```
 
+For an organization on its own domain, pass `custom_domain=` in place of
+`issuer=`.
+
 Behind a reverse proxy, pass `request_url=` to rebuild the public URL that
 the client signed into the proof. Verification needs the `cryptography`
 package: `pip install "lumoauth[verify]"`.
+
+### Verify requests from personal agents
+
+A personal agent that uses the
+[Personal Agent Protocol](https://personalagentprotocol.org) sends a
+`Poppy-Session` header to your API, not to LumoAuth. The SDK forwards the
+method, the public URL and the protocol headers of each request to LumoAuth.
+LumoAuth then answers who the request is from: the personal agent, its user,
+the Session and, for a signed-in request, the account.
+
+The calls authenticate as one of your organization's confidential
+applications, with its client ID and secret over HTTP Basic:
+
+- The application's allowed scopes must include `poppy:verify`. Add the
+  scope under **Applications**, on the application that your API uses.
+- Pass the credentials as `client_id` and `client_secret`, or set
+  `LUMOAUTH_CLIENT_ID` and `LUMOAUTH_CLIENT_SECRET`.
+- These calls never send the client's API key or bearer token.
+
+The [guide to Session verification](https://docs.lumoauth.dev/agents/personal-agent-protocol-verify)
+describes the endpoints in full.
+
+#### Protect FastAPI routes
+
+> Requires `pip install "lumoauth[fastapi]"`.
+
+`LumoAuthPoppy` gives you a dependency for the routes that personal agents
+call. Save this program as `shop.py` and run it with `uvicorn shop:app`.
+
+```python
+import os
+
+from fastapi import Depends, FastAPI
+from lumoauth import LumoAuth, PoppyVerification
+from lumoauth.fastapi import LumoAuthPoppy
+
+app = FastAPI()
+
+lumo = LumoAuth(
+    org_id="acme-corp",
+    client_id=os.environ["LUMOAUTH_CLIENT_ID"],
+    client_secret=os.environ["LUMOAUTH_CLIENT_SECRET"],
+)
+# The address that personal agents call, for example https://shop.example.com
+poppy = LumoAuthPoppy(lumo, public_origin=os.environ["PUBLIC_ORIGIN"])
+poppy.install(app)
+
+CATALOG = [{"sku": "trail-socks-3", "name": "Trail socks, pack of 3", "price": 18}]
+ORDERS = {}  # account id -> list of orders
+
+
+@app.get("/api/catalog")
+def catalog(who: PoppyVerification = Depends(poppy.session())):
+    # Signed out or signed in. Store Session state, such as a cart, under who.session.id.
+    return {"items": CATALOG, "signed_in": who.signed_in}
+
+
+@app.get("/api/orders")
+def orders(who: PoppyVerification = Depends(poppy.session("orders:read"))):
+    # Signed in, and the access token has the scope. who.account.sub is the user's id.
+    return {"orders": ORDERS.get(who.account.sub, [])}
+```
+
+- **`public_origin` comes from your configuration.** It is the address
+  that personal agents call. The helper builds the URL from `public_origin`
+  and from the raw path of the request, as the client sent it. It never
+  reads the `Host` or `X-Forwarded-*` headers. Behind a proxy that removes a
+  path prefix, put the prefix in `public_origin`, for example
+  `https://example.com/shop`. A missing `public_origin` raises
+  `LumoAuthConfigError` when you create the helper.
+- **`poppy.session(required_scope=None, *, resource=None, allow_replay=False)`**
+  builds the dependency. `required_scope` is a space-separated string or a
+  list. The dependency returns the `PoppyVerification` and also stores it as
+  `request.state.poppy`. It does not read the request body.
+- **A refusal is relayed unchanged.** When LumoAuth refuses a request, the
+  route does not run. The personal agent gets the response that LumoAuth
+  wrote for it: its status, each of its headers and its body. `poppy.install(app)`
+  registers the handler that sends this response. Call it on every FastAPI
+  application that has such routes, including a mounted application.
+- **An SDK error is never relayed.** LumoAuth may be unreachable, or it may
+  answer 401, 403, 404 or 429 about your own application. The SDK raises its
+  usual error, the route does not run, and FastAPI answers with its normal
+  500 response. The error message does not reach the personal agent.
+- **Use one dependency per route.** LumoAuth accepts a Session JWT for one
+  verification. A service that checks one request in several places passes
+  `allow_replay=True`.
+
+A verified `PoppyVerification` has these attributes:
+
+| Attribute | Meaning |
+|---|---|
+| `active` | `True` for a verified request, `False` for a refusal |
+| `client_id`, `client_name` | The personal agent. The `client_id` is what LumoAuth checked. |
+| `user_id` | The agent's stable name for its user at your company. It is not an account. |
+| `agent_id` | Set when the personal agent runs several agents for one user; otherwise `None` |
+| `session` | `PoppySessionInfo(id, sid, is_new, started_at)` |
+| `signed_in`, `account` | Whether the request carried a valid access token, and `PoppyAccount(sub, scope, scopes, aud, exp, token_type)` or `None` |
+| `version`, `extensions` | The `Poppy-Version` of the request, and its extensions as name and version |
+| `raw` | The decoded answer of LumoAuth |
+
+Use `account.sub` to find account data. Never use `user_id` for that,
+because the personal agent chose that value.
+
+#### Verify a request without the helper
+
+`client.poppy.verify_request()` works with any framework. Pass the method,
+the public URL and the headers of the request. You may pass every header:
+the SDK sends only `Poppy-Session`, `Poppy-Version`, `Poppy-Extensions`,
+`Authorization` and `DPoP`, so no cookie and no API key leaves your service.
+
+```python
+import os
+
+from lumoauth import LumoAuth
+
+lumo = LumoAuth(org_id="acme-corp")  # reads LUMOAUTH_CLIENT_ID and LUMOAUTH_CLIENT_SECRET
+PUBLIC_ORIGIN = os.environ["PUBLIC_ORIGIN"].rstrip("/")  # for example https://shop.example.com
+
+
+def handle(method, raw_path, headers):
+    """Takes the method, raw path and headers of a request. Returns status, headers and JSON body."""
+    who = lumo.poppy.verify_request(
+        method,
+        PUBLIC_ORIGIN + raw_path,
+        headers,
+        required_scope="orders:read",
+    )
+    if not who.active:
+        # The response that the personal agent must get, unchanged.
+        refusal = who.response
+        if refusal.body is None:
+            return refusal.status, refusal.headers, None
+        return refusal.status, {**refusal.headers, "Content-Type": "application/json"}, refusal.body
+    return 200, {"Content-Type": "application/json"}, {"account": who.account.sub}
+```
+
+- A refusal is a result with `active=False`. It does not raise. It has
+  `error`, `error_description`, `scope` and `response`, a
+  `PoppyResponse(status, headers, body)`. Send that response unchanged. When
+  `body` is `None`, send no body and no `Content-Type`.
+- Any other failure raises: `LumoAuthAuthenticationError` (401),
+  `LumoAuthPermissionDeniedError` (403, the application lacks
+  `poppy:verify`), `LumoAuthNotFoundError` (404, the protocol is switched
+  off), `LumoAuthRateLimitError` (429) or `LumoAuthNetworkError`. These
+  errors are about your own application. Answer the personal agent with a
+  5xx status and never relay them.
+- A 200 answer that is neither a verified result nor a well-formed refusal
+  raises `LumoAuthValidationError`. The SDK never returns it as verified.
+- Without a client ID and secret, the call raises `LumoAuthConfigError`
+  before it sends a request.
+- `build_poppy_verify_body(public_origin, method, target, headers, ...)`
+  builds the request body without any I/O. It applies the URL rules: it
+  removes trailing slashes from the origin, appends the raw path, and drops
+  the query. Use it to see what the SDK sends for a request.
+
+In a FastAPI route that calls `poppy.verify(request)` itself,
+`poppy_refusal_response(who)` builds the response for a refusal:
+
+```python
+from fastapi import Request
+from lumoauth.fastapi import poppy_refusal_response
+
+@app.get("/api/cart")
+def cart(request: Request):
+    who = poppy.verify(request)
+    if not who.active:
+        return poppy_refusal_response(who)
+    return {"session": who.session.id}
+```
+
+#### Look up and end a Session
+
+Sometimes you must know the state of a Session when the personal agent sent
+no request. The main case is a website that joined a browser to a Session:
+ask LumoAuth on each page request.
+
+```python
+status = lumo.poppy.get_session_status(who.client_id, who.session.sid)
+
+if status.status != "active":        # "active", "ended" or "unknown"
+    ...  # drop the cookie: the browser is a visitor again
+elif not status.signed_in:
+    ...  # keep the Session, and treat the browser as signed out
+```
+
+`get_session_status()` returns `PoppySessionStatus(status, user_id, agent_id,
+account, signed_in, last_seen_at)`. An unknown Session is a result with
+`status="unknown"`, not an error.
+
+End a Session when your own rules require it, for example after a fraud
+signal. The user stays signed in, and the personal agent starts a new Session.
+
+```python
+ended = lumo.poppy.end_session(who.client_id, who.session.sid)
+# True; False when the Session had ended before
+```
+
+An unknown Session raises `LumoAuthNotFoundError`. Both calls raise
+`LumoAuthValidationError` for an empty argument, before they send a request.
 
 ### AAuth cryptographic identity
 
@@ -1223,7 +1547,11 @@ new_tokens = client.refresh(tokens["refresh_token"], fresh_resource_tok, agent_t
 
 **Discovery.** `client.discover_issuer()` and
 `client.discover_resource("https://api.example.com")` fetch the `.well-known`
-metadata documents.
+metadata documents. `client.get_issuer()` returns the AAuth issuer. It is the
+`iss` of AAuth tokens and the audience that the agent addresses, for example
+in the `aud` of its agent token. The AAuth issuer is always the platform
+address, `{base_url}/orgs/{org_id}/api/v1`, also for an organization on its
+own domain. See [Use a custom domain](#use-a-custom-domain).
 
 The Python SDK signs AAuth requests and obtains tokens. It does not verify
 AAuth tokens on the resource side. It also does not wrap the `exchange`
@@ -1315,7 +1643,8 @@ exceptions. To keep old `except` clauses working:
 
 ```python
 LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
-         timeout=30, skip_cert_validation=False)
+         timeout=30, skip_cert_validation=False, client_id=None, client_secret=None,
+         custom_domain=None)
 ```
 
 #### `client.auth`
@@ -1412,6 +1741,27 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 | `revoke(token, *, token_type_hint="refresh_token", client_id=None, client_secret=None)` | Revokes a delegation |
 | `parse_actor_chain(token)`, `get_subject(token)` *(static)* | Read the `act` chain and `sub` of a JWT |
 
+#### `client.poppy`
+
+These calls authenticate with HTTP Basic (`client_id` and `client_secret`),
+never with the API key or the token. The application needs the
+`poppy:verify` scope.
+
+| Method | What it does |
+|---|---|
+| `verify_request(method, url, headers, *, required_scope=None, resource=None, allow_replay=False)` | Asks LumoAuth who a request of a personal agent is from. `url` is the public URL; `headers` is a mapping or a list of pairs, of which only the five protocol headers are sent. Returns `PoppyVerification`, with `active=False` and the `response` to relay for a refusal |
+| `get_session_status(personal_agent, sid)` | Looks a Session up; returns `PoppySessionStatus(status, user_id, agent_id, account, signed_in, last_seen_at)` with `status` `"active"`, `"ended"` or `"unknown"` |
+| `end_session(personal_agent, sid)` | Ends a Session; returns `True`, or `False` when the Session had ended before; an unknown Session raises `LumoAuthNotFoundError` |
+
+| Name | What it is |
+|---|---|
+| `PoppyVerification` | Frozen dataclass: `active`; for a verified request `client_id`, `client_name`, `user_id`, `agent_id`, `session`, `signed_in`, `account`, `version`, `extensions`; for a refusal `error`, `error_description`, `scope`, `response`; and `raw` |
+| `PoppySessionInfo` | `id` (integer), `sid`, `is_new`, `started_at` |
+| `PoppyAccount` | `sub`, `scope` (string), `scopes` (tuple), `aud` (tuple), `exp` (integer), `token_type`, and `has_scope(scope)` |
+| `PoppyResponse` | The response to relay for a refusal: `status`, `headers` (dict of string to string), `body` (dict or `None`) |
+| `build_poppy_verify_body(public_origin, method, target, headers, *, required_scope=None, resource=None, allow_replay=False)` | Pure function that builds the JSON body of `verify_request` from a public origin, a method, a raw request target and the headers |
+| `POPPY_FORWARDED_HEADERS` | The five header names that the SDK sends to LumoAuth |
+
 #### `client.mcp` and `client.api`
 
 | Member | What it does |
@@ -1425,7 +1775,8 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 
 ```python
 LumoAuthAgent(base_url=None, org_id=None, client_id=None, client_secret=None,
-              skip_cert_validation=False, dpop=None)
+              skip_cert_validation=False, dpop=None, private_key=None, key_id=None,
+              issuer=None, custom_domain=None)
 ```
 
 `dpop` is `True` (ephemeral ES256 key), a `DpopKey` or a `DpopProofSigner`.
@@ -1488,7 +1839,7 @@ DelegationChain(agent, *, redirect_uri=None)
 
 ```python
 AAuthClient(agent_identifier, private_key_pem, *, base_url=None, org_id=None,
-            kid="key-1", skip_cert_validation=False)
+            kid="key-1", skip_cert_validation=False, custom_domain=None, issuer=None)
 ```
 
 | Method | What it does |
@@ -1500,6 +1851,7 @@ AAuthClient(agent_identifier, private_key_pem, *, base_url=None, org_id=None,
 | `refresh(refresh_token, resource_token, *, scope=None, agent_token, timeout=30)` | Refreshes with a resource token from the same resource. `scope` only narrows |
 | `signed_request(method, url, *, auth_token, data=None, timeout=30)` | Signed request with a Bearer token |
 | `discover_issuer()`, `discover_resource(resource_url)` | Fetch `.well-known` metadata |
+| `get_issuer()` | The AAuth issuer: the constructor's `issuer`, else the platform address built from `base_url` and `org_id`, else (with `custom_domain`) the `issuer` member of the issuer metadata document, read once. Never the custom domain |
 
 `request_authorization()` raises `LumoAuthValidationError` without an
 `agent_token`. LumoAuth ignores its `scope` argument: the resource token names
@@ -1522,8 +1874,8 @@ a query string.
 
 | Name | What it does |
 |---|---|
-| `verify_access_token(token, *, issuer, resource, jwks=None, fetch=None, clock_skew=60, require_dpop=False, dpop=None, replay_cache=None, now=None)` | Verifies a LumoAuth access token; returns `AccessTokenClaims` or raises `LumoAuthTokenError` |
-| `AccessTokenVerifier(issuer, resource, *, jwks=None, fetch=None, jwks_uri=None, clock_skew=60, require_dpop=False, replay_cache=None, proof_max_age=300)` | A verifier with its own JWKS and replay caches; `verify(token, *, dpop=None)` |
+| `verify_access_token(token, *, issuer=None, resource, jwks=None, fetch=None, clock_skew=60, require_dpop=False, dpop=None, replay_cache=None, now=None, custom_domain=None)` | Verifies a LumoAuth access token; returns `AccessTokenClaims` or raises `LumoAuthTokenError`. Pass `issuer`, or `custom_domain` for an organization on its own domain |
+| `AccessTokenVerifier(issuer=None, resource=None, *, jwks=None, fetch=None, jwks_uri=None, clock_skew=60, require_dpop=False, replay_cache=None, proof_max_age=300, custom_domain=None)` | A verifier with its own JWKS and replay caches; `verify(token, *, dpop=None)` |
 | `AccessTokenClaims` | `sub`, `iss`, `aud`, `exp`, `nbf`, `jti`, `scopes`, `scope`, `has_scope()`, `has_scopes()`, `missing_scopes()`, `is_agent`, `agent_id`, `capabilities`, `has_capability()`, `act`, `act_chain`, `actor`, `is_delegated`, `cnf`, `dpop_thumbprint`, `is_dpop_bound`, `token_use`, `claims`, `header` |
 | `DpopRequest(method, url, proof, scheme="DPoP", nonce=None)` | What the incoming request carried, for the DPoP check |
 | `InMemoryReplayCache`, `ReplayCache` | The default `jti` cache, and the protocol (`check_and_add(key, ttl) -> bool`) for your own |
@@ -1541,13 +1893,19 @@ a query string.
 
 | Name | What it does |
 |---|---|
-| `lumo_auth_router(*, base_url, organization, client_id, client_secret=None, callback_path="/auth/callback", scope="openid profile email", post_login_redirect="/", post_logout_redirect="/")` | Router with `/login`, `/callback` and `/logout` |
+| `lumo_auth_router(*, base_url=None, organization=None, client_id, client_secret=None, callback_path="/auth/callback", scope="openid profile email", post_login_redirect="/", post_logout_redirect="/", custom_domain=None)` | Router with `/login`, `/callback` and `/logout`. Pass `base_url` and `organization`, or `custom_domain` |
 | `get_current_user(request)` | Dependency that returns `User` or `None` |
 | `require_auth(scopes=None)` | Dependency factory that answers 401 or 403 |
-| `require_access_token(*, issuer, resource, scopes=None, require_dpop=False, verifier=None, jwks=None, fetch=None, clock_skew=60, replay_cache=None, request_url=None)` | Dependency factory for resource servers: verifies the incoming LumoAuth token (and its DPoP proof) and returns `AccessTokenClaims`; answers 401 with `WWW-Authenticate` or 403 `insufficient_scope` |
+| `require_access_token(*, issuer=None, resource, scopes=None, require_dpop=False, verifier=None, jwks=None, fetch=None, clock_skew=60, replay_cache=None, request_url=None, custom_domain=None)` | Dependency factory for resource servers: verifies the incoming LumoAuth token (and its DPoP proof) and returns `AccessTokenClaims`; answers 401 with `WWW-Authenticate` or 403 `insufficient_scope` |
 | `parse_authorization(value)` | Splits an `Authorization` header into `("Bearer" or "DPoP", token)` |
 | `User` | Pydantic model of the signed-in user |
 | `LumoAuthFastAPI` | Configuration container |
+| `LumoAuthPoppy(client, *, public_origin)` | Helper for routes that personal agents call. `client` is a `LumoAuth` client with `client_id` and `client_secret`; a missing `public_origin` raises `LumoAuthConfigError` |
+| `poppy.install(app)` | Registers the handler that relays a refusal; call it once on each application |
+| `poppy.session(required_scope=None, *, resource=None, allow_replay=False)` | Dependency factory: returns the `PoppyVerification` of a verified request (also `request.state.poppy`); a refusal is relayed unchanged and the route does not run |
+| `poppy.verify(request, *, required_scope=None, resource=None, allow_replay=False)` | Verifies a request and returns the `PoppyVerification`, verified or refused |
+| `poppy_refusal_response(verification)` | Builds the response for a refusal: its status, headers and body, unchanged |
+| `PoppyRefusal`, `poppy_refusal_handler` | The exception that the dependency raises for a refusal, and its handler |
 
 ## Troubleshooting
 
@@ -1565,19 +1923,24 @@ a query string.
 | 403 `test_token_not_accepted` from approvals | The agent uses a portal test token | Use the agent's real credentials |
 | `require_approval()` returns status `pending` | `timeout_s` passed before anybody answered | Raise `timeout_s`, or poll later with `approvals.get_status()` |
 | `LumoAuthRateLimitError` (429) | Too many requests | Wait `err.retry_after` seconds, then retry |
-| `LumoAuthConfigError: org_id is required` | The call is org-scoped and no slug is set | Pass `org_id` or set `LUMOAUTH_ORG_ID` |
+| `LumoAuthConfigError: org_id is required` | The call is org-scoped and no slug is set | Pass `org_id` or set `LUMOAUTH_ORG_ID`. For an organization on its own domain, pass `custom_domain` |
+| Every call to an organization on its own domain answers 404 | The domain is set as `base_url`, so the paths carry `/orgs/...` | Pass the domain as `custom_domain`, not as `base_url` |
 | `authenticate()` returns `False` | Wrong client ID or secret, or the agent is suspended | Check the credentials; the log contains the HTTP status |
 | FastAPI `/auth/login` answers 500 `session_middleware_missing` | `SessionMiddleware` is not added | Add `SessionMiddleware` before the router |
+| `LumoAuthPermissionDeniedError` (`insufficient_scope`) from a `client.poppy` call | The application lacks the `poppy:verify` scope | Add `poppy:verify` to the allowed scopes of the application |
+| Every request of a personal agent is refused with `invalid_session`, and the description names another URL (`htu`) | `public_origin` is not the address that the personal agent called | Set `public_origin` to the public address, with the path prefix that your proxy removes |
+| A route with `poppy.session()` answers 500, and the log shows `LumoAuthConfigError` about the refusal handler | `poppy.install(app)` was not called on the application that serves the route | Call `poppy.install(app)`, also on a mounted application |
 
 ## Versioning and compatibility
 
 | Item | Value |
 |---|---|
-| SDK version | 1.0.0 |
+| SDK version | The latest version is on the [PyPI page of `lumoauth`](https://pypi.org/project/lumoauth/). `pip install lumoauth` installs it. |
 | Minimum LumoAuth server API | 1.0.0 |
 | Python | 3.9 to 3.13 |
 
-The SDK follows semantic versioning. Its routes come from the shared SDK
+The notes for each release are in the
+[`release-notes`](release-notes) folder. The SDK follows semantic versioning. Its routes come from the shared SDK
 contract, and a test fails when they drift from the server's API.
 
 ## Development
@@ -1593,7 +1956,7 @@ Without a local Python environment, run them in Docker:
 
 ```bash
 docker run --rm -v "$PWD":/src -w /src python:3.12 \
-  sh -c 'pip install -q requests pytest cryptography && PYTHONPATH=src python -m pytest -q'
+  sh -c 'pip install -q requests pytest cryptography fastapi httpx && PYTHONPATH=src python -m pytest -q'
 ```
 
 The contract tests read `../sdk-contract`, or the path in `LUMO_SDK_CONTRACT`.
@@ -1603,6 +1966,19 @@ They are skipped when neither exists.
 
 ### Unreleased
 
+- New: custom domains. An organization can serve LumoAuth on its own domain,
+  such as `https://auth.acme.com`. Pass `custom_domain=` to `LumoAuth`,
+  `LumoAuthAgent`, `AAuthClient`, `verify_access_token()`,
+  `AccessTokenVerifier`, `lumo_auth_router()` or `require_access_token()`,
+  or set `LUMOAUTH_CUSTOM_DOMAIN`. The SDK then sends every request to the
+  domain, with paths that have no `/orgs/{org_id}` segment, and `org_id` is
+  not needed. The issuer is the bare domain: local token verification
+  accepts exactly that issuer, and a client assertion names it in `aud`.
+  The custom domain wins over `base_url`. New `client.issuer` and
+  `client.custom_domain`. AAuth is the exception: its issuer stays the
+  platform address on a custom domain, and the new `AAuthClient.get_issuer()`
+  reads it from the issuer metadata document. Earlier releases put `/orgs/{org_id}` in every
+  organization path, so each call to a custom domain answered 404.
 - Capability matching follows the server's `<resource>:<action>` form
   (`invoices:read`, `invoices:*`). `normalize_capability()` now returns that
   form, and `capability_covers()`, `any_capability_covers()`,
@@ -1640,6 +2016,18 @@ They are skipped when neither exists.
   token. New `agents.authorize_mcp_tool()` and
   `LumoAuthAgent.authorize_mcp_tool()` let an agent ask about itself. On
   both, a deny returns `allowed=False` and does not raise.
+- New: Session verification for the Personal Agent Protocol.
+  `client.poppy.verify_request()` asks LumoAuth who a request of a personal
+  agent is from. It returns a `PoppyVerification`: a verified result, or a
+  refusal with the exact response to relay. `client.poppy.get_session_status()`
+  looks a Session up and `client.poppy.end_session()` ends one. The calls
+  authenticate with HTTP Basic, with the new `client_id` and `client_secret`
+  arguments of `LumoAuth` (`LUMOAUTH_CLIENT_ID`, `LUMOAUTH_CLIENT_SECRET`).
+  The application needs the `poppy:verify` scope. New FastAPI helper
+  `LumoAuthPoppy`: its dependency `poppy.session()` gives a route the
+  verified result and relays a refusal unchanged, and
+  `poppy_refusal_response()` relays one by hand. New pure function
+  `build_poppy_verify_body()`.
 - `LumoAuthPermissionDeniedError.required_scopes` lists the scopes that
   LumoAuth names when it refuses a request for a missing scope.
 - Fix: permission checks with `user_id` now send the user as

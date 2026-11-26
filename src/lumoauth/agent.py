@@ -66,6 +66,7 @@ class LumoAuthAgent:
         private_key: Union["ClientAssertionSigner", str, bytes, None] = None,
         key_id: str | None = None,
         issuer: str | None = None,
+        custom_domain: str | None = None,
     ) -> None:
         """Initialise the agent client.
 
@@ -76,6 +77,7 @@ class LumoAuthAgent:
         ===============  ========================
         ``base_url``     ``LUMOAUTH_URL``
         ``org_id``       ``LUMOAUTH_ORG_ID``
+        ``custom_domain`` ``LUMOAUTH_CUSTOM_DOMAIN``
         ``client_id``    ``AGENT_CLIENT_ID``
         ``client_secret`` ``AGENT_CLIENT_SECRET``
         ``private_key``  ``AGENT_PRIVATE_KEY`` (PEM)
@@ -99,15 +101,28 @@ class LumoAuthAgent:
             key_id: The ``kid`` of the registered public key, used with a PEM
                 ``private_key``. Required when the agent has several keys.
             issuer: The organization's issuer identifier, the assertion's
-                ``aud``. Defaults to ``{base_url}/orgs/{org_id}/api/v1``;
-                set it on a custom domain.
+                ``aud``. Defaults to ``{base_url}/orgs/{org_id}/api/v1``,
+                or to the bare domain with ``custom_domain``.
+            custom_domain: The organization's own domain, as a host name or
+                an ``https://`` origin (``"auth.acme.com"``). Every request
+                then goes to that domain, with paths that have no
+                ``/orgs/{org_id}`` segment. ``base_url`` is not used, and
+                ``org_id`` is not needed.
 
         Raises:
             LumoAuthConfigError: If ``client_id``, or both ``client_secret``
                 and ``private_key``, cannot be resolved (subclasses
-                ``ValueError`` for compatibility).
+                ``ValueError`` for compatibility). Also for a malformed
+                ``custom_domain``.
         """
-        self.base_url: str = (
+        from lumoauth._routes import normalize_custom_domain
+
+        #: The custom domain as ``https://<host>[:port]``, or ``None``.
+        self.custom_domain: str | None = normalize_custom_domain(
+            custom_domain
+        ) or normalize_custom_domain(os.environ.get("LUMOAUTH_CUSTOM_DOMAIN"))
+        # A custom domain that is set wins over the base URL.
+        self.base_url: str = self.custom_domain or (
             base_url or os.environ.get("LUMOAUTH_URL", "https://app.lumoauth.dev")
         )
         self.org_id: str = (
@@ -158,6 +173,7 @@ class LumoAuthAgent:
             org_id=self.org_id or None,
             token_provider=self._provide_token,
             skip_cert_validation=skip_cert_validation,
+            custom_domain=self.custom_domain,
         )
 
     # -- helpers exposed as read-only properties ------------------------------
@@ -503,6 +519,10 @@ class LumoAuthAgent:
         Args:
             method: HTTP verb (``GET``, ``POST``, ``PUT``, ``DELETE``, …).
             endpoint: Full URL **or** a path (which is appended to ``base_url``).
+                On a custom domain give the path without the
+                ``/orgs/{org_id}`` segment. A path that carries the segment
+                of the agent's own organization still works when ``org_id``
+                is set: the segment is dropped.
             data: JSON request body.
             json: Alias for ``data`` (kept for keyword compatibility).
             params: Query-string parameters.
@@ -649,7 +669,8 @@ class LumoAuthAgent:
     def client_assertion(self) -> str:
         """A new ``private_key_jwt`` client assertion for this agent (single-use).
 
-        Its ``aud`` is :attr:`issuer`, or ``{base_url}/orgs/{org_id}/api/v1``.
+        Its ``aud`` is :attr:`issuer`, or ``{base_url}/orgs/{org_id}/api/v1``,
+        or the bare domain on a custom domain.
 
         Raises:
             LumoAuthConfigError: The agent was created without ``private_key``.
@@ -660,11 +681,11 @@ class LumoAuthAgent:
             )
         from lumoauth.client_assertion import issuer_for
 
-        if not self.issuer and not self.org_id:
+        if not self.issuer and not self.org_id and not self.custom_domain:
             raise LumoAuthConfigError(
                 "org_id (LUMOAUTH_ORG_ID) or issuer is needed to address a client assertion"
             )
-        audience = self.issuer or issuer_for(self.base_url, self.org_id)
+        audience = self.issuer or issuer_for(self.base_url, self.org_id, self.custom_domain)
         return self.client_assertion_signer.create(self.client_id, audience)
 
     def dpop_proof(self, method: str, url: str, *, access_token: str | None = None) -> str:

@@ -42,6 +42,7 @@ from lumoauth._jose import (
     require_cryptography,
     sign,
 )
+from lumoauth._routes import normalize_custom_domain
 from lumoauth.errors import LumoAuthValidationError
 
 __all__ = ["CLIENT_ASSERTION_TYPE", "ClientAssertionSigner", "issuer_for"]
@@ -58,13 +59,18 @@ MAX_LIFETIME_SECONDS = 600
 _RSA_ALGS = ("RS256", "RS384", "RS512", "PS256", "PS384", "PS512")
 
 
-def issuer_for(base_url: str, org_id: str) -> str:
-    """The issuer identifier of an organization on ``base_url``.
+def issuer_for(base_url: str, org_id: str, custom_domain: Optional[str] = None) -> str:
+    """The issuer identifier of an organization.
 
-    This is the ``issuer`` of ``/orgs/{org_id}/api/v1/.well-known/openid-configuration``
-    and the ``aud`` that a client assertion must carry. On a custom domain the
-    issuer is different; pass it explicitly there.
+    This is the ``issuer`` of the organization's discovery document and the
+    ``aud`` that a client assertion must carry. On the platform host it is
+    ``{base_url}/orgs/{org_id}/api/v1``. On a custom domain it is the bare
+    domain, such as ``https://auth.acme.com``: pass ``custom_domain``, and
+    ``base_url`` and ``org_id`` are then not used.
     """
+    domain = normalize_custom_domain(custom_domain)
+    if domain is not None:
+        return domain
     return f"{base_url.rstrip('/')}/orgs/{org_id}/api/v1"
 
 

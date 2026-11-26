@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional
 
 import requests
 
-from lumoauth._routes import ROUTES, format_path
+from lumoauth._routes import (
+    ROUTES,
+    format_path,
+    issuer_url,
+    normalize_custom_domain,
+    org_api_base,
+    strip_org_segment,
+)
 from lumoauth.errors import (
     LumoAuthApiError,
     LumoAuthAuthenticationError,
@@ -51,6 +58,10 @@ class HttpClient:
       ``dpop=`` signer adds a proof to an unauthenticated call (the token
       endpoint). A ``use_dpop_nonce`` answer is retried once with the
       nonce the server sent.
+    - Custom domain: with ``custom_domain`` the domain is the base URL, no
+      path carries the ``/orgs/{org_id}`` segment, and ``org_id`` is not
+      needed. ``base_url`` is then not used for any request. The rule
+      itself is in :mod:`lumoauth._routes`.
     """
 
     def __init__(
@@ -63,8 +74,12 @@ class HttpClient:
         timeout: float = 30,
         verify_tls: bool = True,
         session: Optional[requests.Session] = None,
+        custom_domain: Optional[str] = None,
     ) -> None:
-        self.base_url = (base_url or "").rstrip("/")
+        # Raises LumoAuthConfigError for a malformed value, when the client
+        # is created. A custom domain that is set wins over the base URL.
+        self.custom_domain: Optional[str] = normalize_custom_domain(custom_domain)
+        self.base_url = self.custom_domain or (base_url or "").rstrip("/")
         self.org_id = org_id
         self.api_key = api_key
         self.token_provider = token_provider
@@ -77,7 +92,13 @@ class HttpClient:
     # ── URL helpers ───────────────────────────────────────────────────
 
     def org_path(self, path: str) -> str:
-        """Prefix *path* with the org-scoped API base (``/orgs/{org}/api/v1``)."""
+        """Prefix *path* with the org-scoped API base.
+
+        ``/orgs/{org}/api/v1`` on the platform host, ``/api/v1`` on a
+        custom domain.
+        """
+        if self.custom_domain is not None:
+            return f"/api/v1{path}"
         if not self.org_id:
             raise LumoAuthConfigError(
                 "org_id is required for this call — pass org_id to the client "
@@ -87,6 +108,10 @@ class HttpClient:
 
     def _fill_route(self, route: str, path_params: Optional[Mapping[str, Any]]):
         params = dict(path_params or {})
+        if self.custom_domain is not None:
+            # No path carries the organization on a custom domain, so the
+            # organization ID is not needed.
+            return format_path(route, custom_domain=True, **params)
         _, template = ROUTES[route]
         if "{org_id}" in template and "org_id" not in params:
             if not self.org_id:
@@ -96,6 +121,37 @@ class HttpClient:
                 )
             params["org_id"] = self.org_id
         return format_path(route, **params)
+
+    def route_url(self, route: str, path_params: Optional[Mapping[str, Any]] = None) -> str:
+        """The full URL of a registered route for this client."""
+        _, path = self._fill_route(route, path_params)
+        return f"{self.base_url}{path}"
+
+    @property
+    def issuer(self) -> str:
+        """The organization's issuer: the ``iss`` of its tokens.
+
+        ``{base_url}/orgs/{org_id}/api/v1`` on the platform host, and the
+        bare domain on a custom domain.
+        """
+        return issuer_url(self.base_url, self.org_id, self.custom_domain)
+
+    @property
+    def api_base(self) -> str:
+        """The address below which the organization's API routes are served."""
+        return org_api_base(self.base_url, self.org_id, self.custom_domain)
+
+    def _own_path(self, path: str) -> str:
+        """A path that the caller wrote, in the form that this client's host serves.
+
+        On a custom domain the ``/orgs/{org}`` segment of the client's own
+        organization is dropped, so that a path written for the platform
+        host keeps working. It is dropped only when the organization ID is
+        known. Any other path is sent as it stands.
+        """
+        if self.custom_domain is not None and self.org_id:
+            return strip_org_segment(path, self.org_id)
+        return path
 
     # ── Request entry points ──────────────────────────────────────────
 
@@ -112,6 +168,7 @@ class HttpClient:
         auth: bool = True,
         raw: bool = False,
         dpop: Optional["DpopProofSigner"] = None,
+        allow_redirects: Optional[bool] = None,
     ) -> Any:
         """Invoke a route from the :mod:`lumoauth._routes` registry."""
         method, path = self._fill_route(route, path_params)
@@ -126,6 +183,7 @@ class HttpClient:
             auth=auth,
             raw=raw,
             dpop=dpop,
+            allow_redirects=allow_redirects,
         )
 
     def request(
@@ -141,6 +199,7 @@ class HttpClient:
         auth: bool = True,
         raw: bool = False,
         dpop: Optional["DpopProofSigner"] = None,
+        allow_redirects: Optional[bool] = None,
     ) -> Any:
         """Send a request to a path (joined to ``base_url``) or a full URL.
 
@@ -148,11 +207,14 @@ class HttpClient:
         status mapping (transport errors are still wrapped). ``dpop`` adds a
         DPoP proof without a token (token endpoint); bearer tokens are
         DPoP-bound when :attr:`dpop` is set on the client.
+        ``allow_redirects=False`` makes a redirect answer an error instead of
+        a second request: use it for a call whose body must not be sent to
+        another address.
         """
         url = (
             path_or_url
             if path_or_url.startswith(("http://", "https://"))
-            else f"{self.base_url}{path_or_url}"
+            else f"{self.base_url}{self._own_path(path_or_url)}"
         )
 
         hdrs: Dict[str, str] = dict(headers or {})
@@ -171,6 +233,9 @@ class HttpClient:
                 # Authorization header free for bearer tokens).
                 hdrs["X-API-Key"] = self.api_key
         add_proof = signer is not None and "DPoP" not in hdrs
+        extra: Dict[str, Any] = {}
+        if allow_redirects is not None:
+            extra["allow_redirects"] = allow_redirects
 
         for attempt in (0, 1):
             send_headers = dict(hdrs)
@@ -186,6 +251,7 @@ class HttpClient:
                     headers=send_headers,
                     timeout=timeout if timeout is not None else self.timeout,
                     verify=self.verify_tls,
+                    **extra,
                 )
             except requests.RequestException as exc:
                 raise LumoAuthNetworkError(

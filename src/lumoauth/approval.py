@@ -122,11 +122,16 @@ def require_approval(
     if impact not in ("low", "medium", "high", "critical"):
         raise LumoAuthValidationError(f"invalid impact: {impact!r}")
 
+    # On a custom domain no path carries the organization, so the agent
+    # needs no org_id there. lumoauth._routes holds the rule.
+    on_custom_domain = bool(getattr(agent, "custom_domain", None))
     org_id = getattr(agent, "org_id", None)
-    if not org_id:
+    if not org_id and not on_custom_domain:
         raise LumoAuthConfigError("agent has no org_id; call agent.authenticate() first")
 
-    _, create_path = format_path("approvals.create", org_id=org_id)
+    _, create_path = format_path(
+        "approvals.create", custom_domain=on_custom_domain, org_id=org_id
+    )
     create_resp = agent.api_request(
         "POST",
         create_path,
@@ -152,7 +157,9 @@ def require_approval(
     last: Dict[str, Any] = {"status": "pending"}
     while time.monotonic() < deadline:
         time.sleep(poll_interval_s)
-        _, status_path = format_path("approvals.status", org_id=org_id, token=token)
+        _, status_path = format_path(
+            "approvals.status", custom_domain=on_custom_domain, org_id=org_id, token=token
+        )
         status_resp = agent.api_request(
             "GET",
             status_path,

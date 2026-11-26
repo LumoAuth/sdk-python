@@ -92,6 +92,8 @@ class DelegationChain:
             agent.base_url,
             org_id=agent.org_id,
             verify_tls=self._verify_tls,
+            # The agent's custom domain, when it has one: same host, same paths.
+            custom_domain=getattr(agent, "custom_domain", None),
         )
         self._resource = DelegationResource(self._http)
 
@@ -303,6 +305,8 @@ class DelegationChain:
             session_id: Session identifying the delegation.
             method: HTTP verb (``GET``, ``POST``, etc.).
             endpoint: Full URL or path appended to the agent's ``base_url``.
+                On a custom domain give the path without the
+                ``/orgs/{org_id}`` segment.
             data: JSON request body.
             params: Query-string parameters.
             timeout: Request timeout in seconds.

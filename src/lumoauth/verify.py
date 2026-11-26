@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
 
 from lumoauth._http import HttpClient
+from lumoauth._routes import normalize_custom_domain, org_api_base
 from lumoauth._jose import (
     ASYMMETRIC_ALGS,
     jwk_thumbprint,
@@ -263,7 +264,13 @@ class InMemoryReplayCache:
 
 
 class JwksCache:
-    """Fetches and caches an issuer's JWKS, refetching once on an unknown ``kid``."""
+    """Fetches and caches an issuer's JWKS, refetching once on an unknown ``kid``.
+
+    The discovery document and the key set are read below ``metadata_base``.
+    It defaults to the issuer, which is right on the platform host. On a
+    custom domain the issuer is the bare domain and the documents are below
+    ``{domain}/api/v1``: :class:`AccessTokenVerifier` passes that address.
+    """
 
     def __init__(
         self,
@@ -274,8 +281,10 @@ class JwksCache:
         jwks_uri: Optional[str] = None,
         ttl: float = _DEFAULT_JWKS_TTL,
         verify_tls: bool = True,
+        metadata_base: Optional[str] = None,
     ) -> None:
         self.issuer = issuer.rstrip("/")
+        self.metadata_base = (metadata_base or self.issuer).rstrip("/")
         self._fetch = fetch
         self._verify_tls = verify_tls
         self._jwks_uri = jwks_uri
@@ -351,8 +360,8 @@ class JwksCache:
         self._load(document)
 
     def _discover(self) -> str:
-        discovery_url = f"{self.issuer}/.well-known/openid-configuration"
-        fallback = f"{self.issuer}/.well-known/jwks.json"
+        discovery_url = f"{self.metadata_base}/.well-known/openid-configuration"
+        fallback = f"{self.metadata_base}/.well-known/jwks.json"
         try:
             document = self._get(discovery_url)
         except (LumoAuthApiError, LumoAuthNetworkError):
@@ -368,6 +377,31 @@ class JwksCache:
         return fallback
 
 
+def resolve_issuer(issuer: Optional[str], custom_domain: Optional[str] = None) -> Tuple[str, str]:
+    """The issuer that a token must name, and the address of its metadata.
+
+    Returns ``(issuer, metadata_base)``. Without a custom domain both are
+    the given issuer. With a custom domain the issuer is the bare domain
+    and the metadata is below ``{domain}/api/v1``; an *issuer* that is also
+    given must be that domain, so that exactly one issuer is accepted.
+
+    Raises:
+        LumoAuthConfigError: Neither value is given, a value is malformed,
+            or the two name different issuers.
+    """
+    domain = normalize_custom_domain(custom_domain)
+    if domain is not None:
+        if issuer is not None and (not isinstance(issuer, str) or issuer.rstrip("/") != domain):
+            raise LumoAuthConfigError(
+                "issuer and custom_domain disagree: on a custom domain the issuer is the "
+                f"domain itself ({domain}). Pass custom_domain alone."
+            )
+        return domain, org_api_base("", None, domain)
+    if not isinstance(issuer, str) or not issuer.startswith(("https://", "http://")):
+        raise LumoAuthConfigError("issuer must be the organization's https issuer URL")
+    return issuer.rstrip("/"), issuer.rstrip("/")
+
+
 # ── Verifier ─────────────────────────────────────────────────────────
 
 
@@ -376,8 +410,14 @@ class AccessTokenVerifier:
 
     Args:
         issuer: The organization issuer, for example
-            ``https://app.lumoauth.dev/orgs/acme/api/v1``.
+            ``https://app.lumoauth.dev/orgs/acme/api/v1``. Leave it out
+            with ``custom_domain``.
         resource: Your resource URI; the token's ``aud`` must contain it.
+        custom_domain: The organization's own domain, as a host name or an
+            ``https://`` origin (``"auth.acme.com"``). The issuer is then
+            the bare domain, and a token that names the platform issuer is
+            refused. The discovery document and the key set are read below
+            ``{domain}/api/v1``.
         jwks: A JWKS document to use instead of fetching (tests, pinning).
         fetch: ``fetch(url) -> dict`` used for discovery and the JWKS;
             defaults to the SDK's HTTP client.
@@ -394,8 +434,8 @@ class AccessTokenVerifier:
 
     def __init__(
         self,
-        issuer: str,
-        resource: str,
+        issuer: Optional[str] = None,
+        resource: Optional[str] = None,
         *,
         jwks: Optional[Mapping[str, Any]] = None,
         fetch: Optional[Fetch] = None,
@@ -407,12 +447,14 @@ class AccessTokenVerifier:
         jwks_ttl: float = _DEFAULT_JWKS_TTL,
         verify_tls: bool = True,
         clock: Callable[[], float] = time.time,
+        custom_domain: Optional[str] = None,
     ) -> None:
-        if not isinstance(issuer, str) or not issuer.startswith(("https://", "http://")):
-            raise LumoAuthConfigError("issuer must be the organization's https issuer URL")
+        issuer, metadata_base = resolve_issuer(issuer, custom_domain)
         if not isinstance(resource, str) or not resource:
             raise LumoAuthConfigError("resource is required (your resource URI, the token's aud)")
-        self.issuer = issuer.rstrip("/")
+        self.issuer = issuer
+        #: The custom domain as ``https://<host>[:port]``, or ``None``.
+        self.custom_domain: Optional[str] = normalize_custom_domain(custom_domain)
         self.resource = resource
         self.clock_skew = float(clock_skew)
         self.require_dpop = require_dpop
@@ -426,6 +468,7 @@ class AccessTokenVerifier:
             jwks_uri=jwks_uri,
             ttl=jwks_ttl,
             verify_tls=verify_tls,
+            metadata_base=metadata_base,
         )
 
     def verify(
@@ -657,14 +700,14 @@ class AccessTokenVerifier:
 
 # ── Convenience function ─────────────────────────────────────────────
 
-_verifiers: Dict[Tuple[str, str, bool], AccessTokenVerifier] = {}
+_verifiers: Dict[Tuple[str, str, str, bool], AccessTokenVerifier] = {}
 _verifiers_lock = threading.Lock()
 
 
 def verify_access_token(
     token: str,
     *,
-    issuer: str,
+    issuer: Optional[str] = None,
     resource: str,
     jwks: Optional[Mapping[str, Any]] = None,
     fetch: Optional[Fetch] = None,
@@ -673,6 +716,7 @@ def verify_access_token(
     dpop: Optional[DpopRequest] = None,
     replay_cache: Optional[ReplayCache] = None,
     now: Optional[float] = None,
+    custom_domain: Optional[str] = None,
 ) -> AccessTokenClaims:
     """Verify a LumoAuth access token for *resource*.
 
@@ -684,8 +728,11 @@ def verify_access_token(
 
     Args:
         token: The access token from the ``Authorization`` header.
-        issuer: ``https://app.lumoauth.dev/orgs/{org}/api/v1``.
+        issuer: ``https://app.lumoauth.dev/orgs/{org}/api/v1``. Leave it
+            out with ``custom_domain``.
         resource: Your resource URI (the MCP server's URL).
+        custom_domain: The organization's own domain (``"auth.acme.com"``).
+            The token must then name the bare domain as its issuer.
         jwks: Static JWKS instead of discovery.
         fetch: Custom ``fetch(url) -> dict`` for discovery and the JWKS.
         clock_skew: Leeway in seconds (default 60).
@@ -708,14 +755,19 @@ def verify_access_token(
             clock_skew=clock_skew,
             require_dpop=require_dpop,
             replay_cache=replay_cache,
+            custom_domain=custom_domain,
         )
     else:
-        key = (issuer.rstrip("/"), resource, require_dpop)
+        key = (*resolve_issuer(issuer, custom_domain), resource, require_dpop)
         with _verifiers_lock:
             verifier = _verifiers.get(key)
             if verifier is None:
                 verifier = AccessTokenVerifier(
-                    issuer, resource, clock_skew=clock_skew, require_dpop=require_dpop
+                    issuer,
+                    resource,
+                    clock_skew=clock_skew,
+                    require_dpop=require_dpop,
+                    custom_domain=custom_domain,
                 )
                 _verifiers[key] = verifier
         verifier.clock_skew = float(clock_skew)

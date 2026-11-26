@@ -64,7 +64,7 @@ def parse_authorization(value: Optional[str]) -> tuple[Optional[str], Optional[s
 
 def require_access_token(
     *,
-    issuer: str,
+    issuer: Optional[str] = None,
     resource: str,
     scopes: Optional[list[str]] = None,
     require_dpop: bool = False,
@@ -74,11 +74,16 @@ def require_access_token(
     clock_skew: float = 60,
     replay_cache: Optional[ReplayCache] = None,
     request_url: Optional[Callable[[Request], str]] = None,
+    custom_domain: Optional[str] = None,
 ) -> Callable[..., Awaitable[AccessTokenClaims]]:
     """Dependency factory that verifies the request's LumoAuth access token.
 
     Args:
-        issuer: The organization issuer (``…/orgs/{org}/api/v1``).
+        issuer: The organization issuer (``…/orgs/{org}/api/v1``). Leave
+            it out with ``custom_domain``.
+        custom_domain: The organization's own domain (``"auth.acme.com"``).
+            The issuer is then the bare domain, and a token that names the
+            platform issuer is refused.
         resource: This server's resource URI; the token's ``aud`` must hold it.
         scopes: Scopes the route needs; a token missing one gets 403.
         require_dpop: Refuse tokens that are not DPoP-bound.
@@ -102,6 +107,7 @@ def require_access_token(
         clock_skew=clock_skew,
         require_dpop=require_dpop,
         replay_cache=replay_cache,
+        custom_domain=custom_domain,
     )
     if verifier is not None and require_dpop:
         token_verifier.require_dpop = True

@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlsplit
 import requests
 
 from lumoauth._routes import format_path
-from lumoauth.errors import LumoAuthApiError, LumoAuthValidationError
+from lumoauth.errors import LumoAuthApiError, LumoAuthConfigError, LumoAuthValidationError
 
 logger = logging.getLogger("lumoauth.aauth")
 
@@ -70,6 +70,8 @@ class AAuthClient:
         org_id: str | None = None,
         kid: str = "key-1",
         skip_cert_validation: bool = False,
+        custom_domain: str | None = None,
+        issuer: str | None = None,
     ) -> None:
         """Create an AAuth client.
 
@@ -78,18 +80,44 @@ class AAuthClient:
                 (e.g. ``"https://my-agent.example.com"``).
             private_key_pem: PEM-encoded Ed25519 **private** key.
             base_url: LumoAuth instance URL.
-            org_id: Organization ID.
+            org_id: Organization ID. Not needed with ``custom_domain``.
             kid: Key ID matching the JWKS entry registered with LumoAuth.
+            custom_domain: The organization's own domain, as a host name or
+                an ``https://`` origin (``"auth.acme.com"``), or the
+                ``LUMOAUTH_CUSTOM_DOMAIN`` environment variable. The token
+                endpoint and the issuer metadata are then addressed on that
+                domain, without the ``/orgs/{org_id}`` segment, and
+                ``base_url`` is not used. The AAuth issuer is NOT the
+                domain: see :meth:`get_issuer`.
+            issuer: The AAuth issuer, when you want to set it yourself. It
+                is the ``iss`` of AAuth tokens and the audience that the
+                agent addresses. Without it :meth:`get_issuer` finds it.
+
+        Raises:
+            LumoAuthConfigError: ``custom_domain`` or ``issuer`` is malformed.
         """
         import os
 
+        from lumoauth._routes import normalize_custom_domain
+
         self.agent_identifier = agent_identifier
         self.kid = kid
-        self.base_url: str = base_url or os.environ.get(
+        #: The custom domain as ``https://<host>[:port]``, or ``None``.
+        self.custom_domain: str | None = normalize_custom_domain(
+            custom_domain
+        ) or normalize_custom_domain(os.environ.get("LUMOAUTH_CUSTOM_DOMAIN"))
+        # A custom domain that is set wins over the base URL.
+        self.base_url: str = self.custom_domain or base_url or os.environ.get(
             "LUMOAUTH_URL", "https://app.lumoauth.dev"
         )
         self.org_id: str = org_id or os.environ.get("LUMOAUTH_ORG_ID", "")
         self._verify_tls: bool = not skip_cert_validation
+        if issuer is not None and (
+            not isinstance(issuer, str) or not issuer.startswith(("https://", "http://"))
+        ):
+            raise LumoAuthConfigError("issuer must be the AAuth issuer URL of the organization")
+        # The AAuth issuer: configured here, or found by get_issuer().
+        self._issuer: str | None = issuer.rstrip("/") if issuer else None
 
         # Import cryptography lazily so the rest of the SDK works without it.
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -244,9 +272,16 @@ class AAuthClient:
     # Token flows
     # =========================================================================
 
+    def _token_path(self) -> str:
+        # One rule for both hosts: lumoauth._routes drops the organization
+        # segment on a custom domain.
+        _, path = format_path(
+            "aauth.agent.token", custom_domain=self.custom_domain is not None, org_id=self.org_id
+        )
+        return path
+
     def _token_url(self) -> str:
-        _, path = format_path("aauth.agent.token", org_id=self.org_id)
-        return f"{self.base_url}{path}"
+        return f"{self.base_url}{self._token_path()}"
 
     def request_authorization(
         self,
@@ -493,19 +528,65 @@ class AAuthClient:
     def discover_issuer(self, *, timeout: int = 10) -> dict[str, Any]:
         """Fetch the organization's AAuth issuer metadata.
 
-        The document is served under the issuer URL:
-        ``{base_url}/orgs/{org_id}/api/v1/.well-known/aauth-issuer``.
+        The document is served below the organization's API base:
+        ``{base_url}/orgs/{org_id}/api/v1/.well-known/aauth-issuer``, or
+        ``{custom_domain}/api/v1/.well-known/aauth-issuer`` on a custom domain.
+
+        On a custom domain the document still names the platform address
+        as ``issuer``, and its endpoints and key set are on the platform
+        host. That is how AAuth works: see :meth:`get_issuer`.
         """
-        # The server has no /.well-known/aauth-issuer at the host root (404):
-        # take the issuer path from the token endpoint route.
-        _, token_path = format_path("aauth.agent.token", org_id=self.org_id)
-        issuer_path = token_path.rsplit("/aauth/", 1)[0]
+        # The organization's document (route aauth.issuerMetadata). The server
+        # has no /.well-known/aauth-issuer at the host root.
+        _, path = format_path(
+            "aauth.issuerMetadata", custom_domain=self.custom_domain is not None, org_id=self.org_id
+        )
         resp = requests.get(
-            f"{self.base_url}{issuer_path}/.well-known/aauth-issuer", timeout=timeout,
+            f"{self.base_url}{path}", timeout=timeout,
             verify=self._verify_tls,
         )
         resp.raise_for_status()
         return resp.json()
+
+    def get_issuer(self, *, timeout: int = 10) -> str:
+        """The AAuth issuer of the organization.
+
+        It is the ``iss`` that an AAuth token names, and the audience that
+        the agent addresses, for example in the ``aud`` of its agent token.
+
+        LumoAuth names the AAuth issuer with the platform address on every
+        host: ``{base_url}/orgs/{org_id}/api/v1``. That is also true for an
+        organization on its own domain, so the AAuth issuer is never the
+        custom domain. This differs from OAuth and OpenID Connect, whose
+        issuer on a custom domain is the bare domain.
+
+        - An ``issuer`` given to the constructor is returned as it is.
+        - Without a custom domain the issuer is built from ``base_url`` and
+          ``org_id``.
+        - With a custom domain the SDK reads the ``issuer`` member of the
+          issuer metadata document (:meth:`discover_issuer`, fetched from
+          the custom domain) and keeps it. It never builds the AAuth issuer
+          from the domain or from a default base URL.
+
+        Raises:
+            LumoAuthConfigError: No custom domain is set and ``org_id`` is
+                missing.
+            LumoAuthValidationError: The metadata document names no issuer.
+        """
+        if self._issuer:
+            return self._issuer
+        if self.custom_domain is None:
+            from lumoauth._routes import org_api_base
+
+            return org_api_base(self.base_url, self.org_id)
+        document = self.discover_issuer(timeout=timeout)
+        issuer = document.get("issuer") if isinstance(document, dict) else None
+        if not isinstance(issuer, str) or not issuer.startswith(("https://", "http://")):
+            raise LumoAuthValidationError(
+                "the AAuth issuer metadata document names no issuer"
+            )
+        self._issuer = issuer.rstrip("/")
+        return self._issuer
 
     def discover_resource(self, resource_url: str, *, timeout: int = 10) -> dict[str, Any]:
         """Fetch ``/.well-known/aauth-resource`` from a resource server."""

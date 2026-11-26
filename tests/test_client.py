@@ -17,10 +17,18 @@ from lumoauth.resources import (
     JitResource,
     McpResource,
     PermissionsResource,
+    PoppyResource,
     ZanzibarResource,
 )
 
-ENV_VARS = ("LUMOAUTH_URL", "LUMOAUTH_ORG_ID", "LUMOAUTH_API_KEY")
+ENV_VARS = (
+    "LUMOAUTH_URL",
+    "LUMOAUTH_ORG_ID",
+    "LUMOAUTH_API_KEY",
+    "LUMOAUTH_CUSTOM_DOMAIN",
+    "LUMOAUTH_CLIENT_ID",
+    "LUMOAUTH_CLIENT_SECRET",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +96,7 @@ def test_namespaces_are_wired():
     assert isinstance(client.jit, JitResource)
     assert isinstance(client.approvals, ApprovalsResource)
     assert isinstance(client.mcp, McpResource)
+    assert isinstance(client.poppy, PoppyResource)
 
 
 def test_namespaces_share_one_http_client():
