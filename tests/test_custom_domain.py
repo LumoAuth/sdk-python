@@ -110,8 +110,14 @@ def _python_route(entry: Dict[str, Any]) -> Optional[Tuple[str, str, Dict[str, s
     return name, contract["method"], {o: entry["params"][t] for t, o in zip(theirs, ours)}
 
 
+# A vector entry for a route that this SDK does not have is no test case.
+# test_vector_routes_the_sdk_lacks_are_all_declared checks those entries, so
+# no case of the parametrized test is ever skipped.
+_VECTOR_ROUTES = [(e, _python_route(e)) for e in VECTOR.get("routes", [])]
+
+
 def _route_cases() -> list:
-    return [pytest.param(e, id=e["route"]) for e in VECTOR.get("routes", [])]
+    return [pytest.param(e, found, id=e["route"]) for e, found in _VECTOR_ROUTES if found is not None]
 
 
 def _resolve(http: HttpClient, session: FakeSession, name: str, params: Dict[str, str]) -> Tuple[str, str]:
@@ -124,16 +130,8 @@ def _resolve(http: HttpClient, session: FakeSession, name: str, params: Dict[str
 
 
 @needs_vector
-@pytest.mark.parametrize("entry", _route_cases())
-def test_vector_route_in_both_forms(entry):
-    found = _python_route(entry)
-    if found is None:
-        contract = _CONTRACT_ROUTES[entry["route"]]
-        assert (
-            entry["route"] in _ME["known_missing_routes"]
-            or contract["namespace"] not in _ME["namespaces"]
-        ), f"{entry['route']} is a claimed contract route but lumoauth._routes lacks it"
-        pytest.skip("not a route of the Python SDK")
+@pytest.mark.parametrize("entry,found", _route_cases())
+def test_vector_route_in_both_forms(entry, found):
     name, method, params = found
     platform, custom = VECTOR["platform"], VECTOR["custom_domain"]["custom_domain"]
 
@@ -154,6 +152,20 @@ def test_vector_route_in_both_forms(entry):
     )
     assert _resolve(http, session, name, params) == (method, entry["custom_domain_url"])
     assert "/orgs/" not in session.last[1]
+
+
+@needs_vector
+def test_vector_routes_the_sdk_lacks_are_all_declared():
+    """A route without a test case above is one that the contract lets this SDK lack."""
+    undeclared = [
+        e["route"]
+        for e, found in _VECTOR_ROUTES
+        if found is None
+        and e["route"] not in _ME["known_missing_routes"]
+        and _CONTRACT_ROUTES[e["route"]]["namespace"] in _ME["namespaces"]
+    ]
+    assert undeclared == [], f"claimed contract routes that lumoauth._routes lacks: {undeclared}"
+    assert any(found is not None for _, found in _VECTOR_ROUTES)
 
 
 @needs_vector
@@ -263,13 +275,20 @@ def _derived(key: str, client: LumoAuth) -> str:
 
 
 @needs_vector
-@pytest.mark.parametrize("key", [pytest.param(k, id=k) for k in VECTOR.get("derived", {})])
+@pytest.mark.parametrize(
+    "key", [pytest.param(k, id=k) for k in VECTOR.get("derived", {}) if k not in _NOT_BUILT]
+)
 def test_vector_derived_addresses(key):
-    if key in _NOT_BUILT:
-        pytest.skip(_NOT_BUILT[key])
     platform, custom = _platform_and_custom_clients()
     assert _derived(key, platform) == VECTOR["derived"][key]["platform"]
     assert _derived(key, custom) == VECTOR["derived"][key]["custom_domain"]
+
+
+@needs_vector
+def test_vector_derived_addresses_that_are_not_built_are_still_in_the_vector():
+    """Keeps ``_NOT_BUILT`` honest: a name that left the vector must leave the list."""
+    assert set(_NOT_BUILT) <= set(VECTOR["derived"]), sorted(set(_NOT_BUILT) - set(VECTOR["derived"]))
+    assert set(VECTOR["derived"]) - set(_NOT_BUILT), "every derived address is listed as not built"
 
 
 # ── The rule itself ───────────────────────────────────────────────────
