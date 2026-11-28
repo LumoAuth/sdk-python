@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import logging
+import math
+import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional
 
 import requests
@@ -18,6 +22,7 @@ from lumoauth._routes import (
 from lumoauth.errors import (
     LumoAuthApiError,
     LumoAuthAuthenticationError,
+    LumoAuthBudgetExceededError,
     LumoAuthConfigError,
     LumoAuthNetworkError,
     LumoAuthNotFoundError,
@@ -39,6 +44,12 @@ _STATUS_ERRORS = {
     429: LumoAuthRateLimitError,
 }
 
+# A body code that names a more specific class than the status does
+# (sdk-contract/errors.json, body_code_map). Only for these statuses.
+_BODY_CODE_ERRORS = {
+    (429, "budget_exceeded"): LumoAuthBudgetExceededError,
+}
+
 
 class HttpClient:
     """Thin wrapper around :class:`requests.Session` used by every resource.
@@ -49,7 +60,9 @@ class HttpClient:
       headers passed per-request always win.
     - Maps error statuses to the typed errors in :mod:`lumoauth.errors`,
       parsing ``error`` / ``code`` / ``error_description`` / ``message``
-      from JSON bodies when present.
+      from JSON bodies when present. A 429 with the body code
+      ``budget_exceeded`` raises ``LumoAuthBudgetExceededError`` (a
+      ``LumoAuthRateLimitError``).
     - Wraps ``requests`` transport exceptions in ``LumoAuthNetworkError``.
     - Returns parsed JSON (or ``None`` for 204 / empty bodies).
     - DPoP (RFC 9449): when ``dpop`` holds a
@@ -280,11 +293,14 @@ class HttpClient:
             return body
 
         message, code = self._extract_error(resp, body)
-        err_cls = _STATUS_ERRORS.get(resp.status_code)
-        if err_cls is LumoAuthRateLimitError:
+        err_cls = _BODY_CODE_ERRORS.get((resp.status_code, code or "")) or _STATUS_ERRORS.get(
+            resp.status_code
+        )
+        if err_cls is not None and issubclass(err_cls, LumoAuthRateLimitError):
+            # LumoAuthBudgetExceededError is a LumoAuthRateLimitError too.
             retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-            raise LumoAuthRateLimitError(
-                message, code=code or "RATE_LIMITED",
+            raise err_cls(
+                message, code=code or err_cls().code,
                 status_code=resp.status_code, body=body, retry_after=retry_after,
             )
         if err_cls is not None:
@@ -345,10 +361,30 @@ def _wants_new_nonce(resp: requests.Response) -> bool:
     return wants_new_nonce(resp.status_code, resp.headers, HttpClient._parse_body(resp))
 
 
-def _parse_retry_after(value: Optional[str]) -> Optional[float]:
-    if not value:
+def _parse_retry_after(value: Optional[str], now: Optional[float] = None) -> Optional[float]:
+    """Seconds from a ``Retry-After`` header (RFC 9110 section 10.2.3).
+
+    The value is a number of seconds (``"120"``) or an HTTP date
+    (``"Fri, 27 Nov 2026 18:00:00 GMT"``). A date gives the seconds from now
+    until that date, and 0 for a date in the past. Anything else gives None.
+    """
+    if not value or not isinstance(value, str):
         return None
+    text = value.strip()
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        seconds = float(text)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
         return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        # The asctime form has no zone; HTTP dates are always in UTC.
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    current = time.time() if now is None else now
+    return max(0.0, when.timestamp() - current)

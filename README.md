@@ -42,8 +42,11 @@ if client.permissions.check("document.edit"):
   - [Just-in-Time permissions](#just-in-time-permissions)
   - [Delegation and token exchange](#delegation-and-token-exchange)
   - [MCP tokens](#mcp-tokens)
+  - [Private key JWT: sign in without a secret](#private-key-jwt-sign-in-without-a-secret)
+  - [Workload attestation: sign in with the platform's token](#workload-attestation-sign-in-with-the-platforms-token)
   - [DPoP-bound tokens](#dpop-bound-tokens)
   - [Verify a LumoAuth token in your MCP server](#verify-a-lumoauth-token-in-your-mcp-server)
+  - [Verify a JIT token in your API](#verify-a-jit-token-in-your-api)
   - [Verify requests from personal agents](#verify-requests-from-personal-agents)
   - [AAuth cryptographic identity](#aauth-cryptographic-identity)
   - [The generated API client](#the-generated-api-client)
@@ -544,6 +547,18 @@ For machine-to-machine calls, use the client-credentials grant:
 tokens = client.auth.client_credentials("client_…", "secret", scopes=["documents:read"])
 ```
 
+Add `resource` to get a token for one API. Its `aud` is then that address,
+not the client ID:
+
+```python
+tokens = client.auth.client_credentials(
+    "client_…", "secret", scopes=["documents:read"], resource="https://api.example.com"
+)
+```
+
+When the application lists audience URIs, the address must be one of them or
+start with one. LumoAuth refuses any other address with `invalid_target`.
+
 ### FastAPI integration
 
 > Requires `pip install "lumoauth[fastapi]"`.
@@ -587,13 +602,81 @@ How it works:
 2. LumoAuth redirects back to `callback_path`. The route checks `state`,
    exchanges the code, fetches the user's profile from `/userinfo`, and stores
    the tokens and the profile in the session.
-3. `/auth/logout` deletes the LumoAuth data from the session and redirects to
-   `post_logout_redirect`. It accepts GET and POST. It does not end the user's
-   LumoAuth session.
+3. `/auth/logout` deletes the LumoAuth data from the session and revokes the
+   refresh token. Then it sends the browser to LumoAuth's end-session
+   endpoint with the ID token as `id_token_hint`. LumoAuth ends the user's
+   session there and redirects to `post_logout_redirect`. The route accepts
+   GET and POST.
 
 The app **must** add `SessionMiddleware`. The router keeps its state in the
 session under the key `__lumoauth`, never in URLs. Without the middleware,
 `/auth/login` answers with HTTP 500 and the error `session_middleware_missing`.
+
+**Sign-out.** LumoAuth redirects back only to a registered address. Add the
+absolute form of `post_logout_redirect` to the application's
+**Post-logout redirect URIs** (in the portal: **Applications**, your
+application, **Configuration**, **Logout**). A relative value such as the
+default `/` is made absolute with the address of the request, so with the app
+on `http://localhost:8000` you register `http://localhost:8000/`. When the
+address is not registered, the user stays on LumoAuth's signed-out page. Keep
+`openid` in `scope`: without an ID token LumoAuth asks the user to confirm the
+sign-out. To clear only the local session and leave the LumoAuth session open,
+pass `end_session_on_logout=False`. The next sign-in then completes without
+the sign-in page.
+
+For your own sign-out route, `client.auth.end_session_url(id_token_hint=…,
+post_logout_redirect_uri=…, state=…)` builds the same address.
+
+**Call an API with the user's access token.** Create the configuration
+yourself, so that the router and the `access_token` dependency share it:
+
+```python
+from lumoauth.fastapi import LumoAuthFastAPI
+
+lumo = LumoAuthFastAPI(
+    base_url="https://app.lumoauth.dev",
+    organization="acme-corp",
+    client_id=os.environ["LUMOAUTH_CLIENT_ID"],
+    client_secret=os.environ["LUMOAUTH_CLIENT_SECRET"],
+)
+app.include_router(lumo.router(), prefix="/auth")
+
+@app.get("/api/documents")
+def documents(token: str = Depends(lumo.access_token)):
+    ...  # send "Authorization: Bearer {token}" to your API
+```
+
+`lumo.access_token` returns the access token of the session. When the token
+expires in less than 60 seconds, the dependency first gets a new one with the
+refresh token and stores it in the session. It answers 401 when nobody is
+signed in, and when the token has expired and cannot be refreshed. The
+LumoAuth data of the session is then deleted, so the user signs in again. It
+answers 503 when LumoAuth cannot be reached, and keeps the session. The
+router never refreshes a token by itself: `get_current_user` and
+`require_auth` read only the session.
+
+**What the session holds.** After sign-in the session holds the profile from
+`/userinfo` and these token values: the access token and its expiry time, the
+refresh token, the granted scopes, and the ID token for the sign-out (not kept
+with `end_session_on_logout=False`). Know these limits of Starlette's
+`SessionMiddleware`:
+
+- It keeps the session in a cookie that is signed but not encrypted. Anybody
+  who gets the cookie can read the tokens. Pass `https_only=True` outside
+  local development, so that the browser sends the cookie over HTTPS only.
+- A browser keeps no cookie larger than 4096 bytes and gives no error. With
+  the default scopes the cookie is about 3.2 KB. More scopes and more claims
+  make the tokens larger. When the cookie passes the limit, the router logs a
+  warning on the `lumoauth.fastapi` logger, and the sign-in does not stick.
+  Then request fewer scopes, or use a session middleware that keeps the data
+  on the server.
+- LumoAuth replaces the refresh token at each refresh, and a used refresh
+  token is refused. A second use also revokes every token of that sign-in. The
+  dependency makes one refresh per refresh token in each process, and requests
+  that arrive with the old cookie shortly after get the same new token. When
+  the app runs in several processes, two requests at the moment of a refresh
+  can reach two processes. Use a session middleware that keeps the data on the
+  server for such an app.
 
 For an organization on its own domain, pass `custom_domain="auth.acme.com"`
 in place of `base_url` and `organization`.
@@ -603,13 +686,44 @@ client. Add `?return_to=/dashboard` to the login URL to choose the page that
 opens after sign-in. The router accepts only paths on the same site. For
 anything else it uses `post_login_redirect`.
 
+**Sign-in parameters for one sign-in.** The login route passes these query
+parameters on to LumoAuth, and no others:
+
+| Parameter | Use |
+|---|---|
+| `acr_values` | Ask for a stronger sign-in, such as `urn:lumoauth:acr:mfa` (step-up) |
+| `max_age` | Ask for a sign-in that is at most this many seconds old; `0` asks for a new one |
+| `resource` | The absolute https URL of the API that the access token is for (RFC 8707) |
+| `login_hint` | The address to fill in on the sign-in page |
+| `prompt` | `login`, `consent`, `select_account` or `none` |
+
+For example, when your API answers 401 with `insufficient_user_authentication`
+and asks for multi-factor sign-in, redirect to the login route with those
+values:
+
+```python
+from urllib.parse import urlencode
+from fastapi.responses import RedirectResponse
+
+@app.get("/payouts/step-up")
+def step_up():
+    query = urlencode({"acr_values": "urn:lumoauth:acr:mfa", "max_age": 300,
+                       "resource": "https://api.example.com", "return_to": "/payouts"})
+    return RedirectResponse(f"/auth/login?{query}")
+```
+
+The new tokens replace the old ones in the session. A malformed value is
+answered with 400 `invalid_request`. These parameters can only ask for a
+stricter sign-in or give a hint; LumoAuth checks `resource` against the
+application.
+
 | Name | Purpose |
 |---|---|
 | `lumo_auth_router(...)` | Builds the router. See the [API reference](#lumoauthfastapi) for every argument. |
 | `get_current_user` | Dependency that returns the signed-in `User`, or `None`. |
 | `require_auth(scopes=None)` | Dependency that answers 401 when nobody is signed in, and 403 when the granted scopes lack one of `scopes`. |
 | `User` | Pydantic model of the `/userinfo` claims: `sub`, `email`, `email_verified`, `name`, `given_name`, `family_name`, `picture`. Extra claims are kept. |
-| `LumoAuthFastAPI` | Configuration container. Use it to share settings with your own dependencies. |
+| `LumoAuthFastAPI` | The configuration. `lumo.router()` builds the router from it, and `Depends(lumo.access_token)` gives a route the user's access token, refreshed when it expires. |
 
 The router requests `openid profile email` by default. Pass the `scope`
 argument to request more, for example
@@ -702,6 +816,17 @@ def dispatch_tool(tool_name: str, args: dict):
 As with ABAC, the keys `ip`, `userAgent`, `requestMethod` and `requestPath`
 in the context describe the real request. Values that you send under those
 names are moved under `pep`.
+
+To find the decision in your distributed trace, pass the W3C `traceparent` of
+the current span. The audit entries of the decision then carry its trace ID:
+
+```python
+result = agent.ask("document:read", traceparent="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+```
+
+`is_allowed()` and `client.agents.ask()` take the same argument. An
+OpenTelemetry instrumentation of `requests` adds the header to every call
+instead.
 
 #### Authenticated HTTP requests
 
@@ -935,7 +1060,10 @@ It uses [RFC 8693 token exchange](https://www.rfc-editor.org/rfc/rfc8693). The
 delegated token is a JWT with an `act` claim, which records who acts for
 whom.
 
-`DelegationChain` runs the whole flow for one or more sessions:
+`DelegationChain` runs the whole flow for one or more sessions. The person
+consents to an **application** of your organization, never to the agent: an
+agent does not start a sign-in. Pass the application's client ID, its secret
+when it is confidential, and one of its registered redirect URIs:
 
 ```python
 from lumoauth import LumoAuthAgent, DelegationChain
@@ -943,18 +1071,35 @@ from lumoauth import LumoAuthAgent, DelegationChain
 agent = LumoAuthAgent()
 agent.authenticate()
 
-chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
+chain = DelegationChain(
+    agent,
+    redirect_uri="https://app.example.com/callback",   # registered on the application
+    app_client_id="client_…",                          # the application, not the agent
+    app_client_secret="…",                             # only for a confidential application
+)
 
-# 1. Send the user to the consent page
-url = chain.get_consent_url("session_1", scopes=["documents:read", "documents:write"])
+# 1. Send the person to the consent page (PKCE S256 and a random state)
+url = chain.get_consent_url("session_1", scopes=["documents:read"], offline_access=True)
 
-# 2. Handle the callback with the authorization code
-chain.handle_consent_callback("session_1", authorization_code)
+# 2. The application redeems the code of the callback
+chain.handle_consent_callback("session_1", code, state=returned_state)
 
 # 3. Exchange for a delegated token, and use it
 token = chain.exchange("session_1", scopes=["documents:read"])
 resp = chain.request("session_1", "GET", "https://api.acme.com/documents/abc")
 ```
+
+- The URL asks for `openid` plus your scopes, and `offline_access` when you
+  pass `offline_access=True`. The application must be allowed these scopes,
+  and the agent must hold the scopes as capabilities; otherwise the exchange
+  issues no scope (`400 invalid_scope`).
+- `handle_consent_callback()` redeems the code with the application's client
+  ID, its secret and the PKCE verifier. The agent's credentials play no part.
+  The person's tokens are the application's tokens, and the application also
+  refreshes them.
+- Without `app_client_id`, `get_consent_url()` and
+  `handle_consent_callback()` still use the agent's ID, as earlier releases
+  did, and issue a `FutureWarning`: LumoAuth refuses that request.
 
 Already hold a user token from another sign-in? Skip the consent step:
 
@@ -973,7 +1118,9 @@ token = chain.exchange("session_1", resource="https://api.acme.com")
 ```
 
 **Nested delegation.** A chain can go from the user to an orchestrator agent
-to a specialist agent. LumoAuth allows at most three levels.
+to a specialist agent. A chain holds at most five actors
+(`MAX_DELEGATION_DEPTH`); LumoAuth refuses a deeper exchange with 400
+`invalid_request`.
 
 ```python
 sub_agent = LumoAuthAgent(client_id="agt_specialist", client_secret="…")
@@ -988,8 +1135,19 @@ DelegationChain.parse_actor_chain(nested)   # ["agent:orchestrator", "agent:spec
 `get_subject` and `parse_actor_chain` read the JWT without checking its
 signature. Use them to inspect a token, not to trust one.
 
-**Housekeeping.** `chain.revoke("session_1")`, `chain.revoke_all()`,
-`chain.active_sessions` and `chain.has_delegation("session_1")`.
+**Revocation.** `chain.revoke("session_1")` revokes the person's refresh
+token as the application (`/oauth/revoke` with `app_client_id` and its
+secret). That ends the whole grant, including every delegated token that the
+agent got from it, and returns `True`. It needs a consent with
+`offline_access=True`. Without a refresh token or without `app_client_id`,
+nothing can be revoked at LumoAuth: the agent's own credentials cannot revoke
+the application's token. `revoke()` then only forgets the session here, logs
+a warning and returns `False`. The delegated token stays valid until it
+expires (at most the lifetime of the person's token). The person can also end
+it on their account page, under "AI agents acting for you".
+
+**Housekeeping.** `chain.revoke_all()`, `chain.active_sessions` and
+`chain.has_delegation("session_1")`.
 
 **Low-level token exchange.** `client.auth.token_exchange()` sends an RFC 8693
 request directly. Declare the type of each token that you send. LumoAuth
@@ -1018,12 +1176,30 @@ The subject of an exchange must still be active. LumoAuth answers
 `invalid_grant` for a deactivated or blocked user, for a suspended agent, and
 for a JIT token used as the subject.
 
+**Exchange as an application.** An agent that sends its own token as
+`actor_token` needs no client authentication. A confidential application
+(with token exchange turned on in its settings) authenticates as at the token
+endpoint: `client_id` with `client_secret`, sent as HTTP Basic, or with
+`client_auth_method="client_secret_post"` in the form body. A
+`private_key_jwt` application passes `client_assertion` (from
+`ClientAssertionSigner.create()`) instead of the secret.
+
+```python
+tokens = client.auth.token_exchange(
+    user_access_token,
+    resource="https://api.acme.com",
+    client_id="client_…",
+    client_secret="…",
+)
+```
+
 ### MCP tokens
 
 An agent that calls a secured MCP server exchanges its token first:
 
 ```python
-mcp_token = agent.get_mcp_token("https://mcp.example.com/mcp")   # None on failure
+credential = agent.get_mcp_credential("https://mcp.example.com/mcp")   # raises on failure
+mcp_token = credential.access_token
 mcp_token = client.mcp.get_token("https://mcp.example.com/mcp", subject_token=token)  # raises on failure
 ```
 
@@ -1038,6 +1214,12 @@ The ID must be an absolute `https` URL with no fragment. LumoAuth accepts
 `urn:mcp:financial-data`, raises `LumoAuthValidationError` before the SDK
 sends a request. `get_mcp_token()` raises this error too, and does not
 return `None` for it.
+
+`agent.get_mcp_token()` returns only the token string, and `None` when
+LumoAuth refuses the exchange. It then logs the error and issues a
+`FutureWarning` with the reason. Returning `None` is deprecated: a later
+major release will raise. Use `get_mcp_credential()`, which raises the typed
+error now.
 
 The token names exactly one MCP server. Pass the Resource URI that is
 registered for that server. The token works only at that MCP server, and
@@ -1144,6 +1326,61 @@ or the bare domain with `custom_domain=`), `exp` is 60 seconds ahead and `jti` i
 PS256 to PS512. Pass either `client_secret` or `private_key`, not both. Combine
 it with `dpop=` to also bind the tokens to a key.
 
+### Workload attestation: sign in with the platform's token
+
+An agent registered with the **Workload** identity type has no secret
+either. Its runtime (GitHub Actions, AWS, Azure, Google Cloud, Kubernetes or
+SPIFFE) gives the workload an OIDC token. LumoAuth checks that token against
+the identity registered on the agent and issues a short-lived access token
+for the agent.
+
+```python
+import os
+
+import requests
+from lumoauth import LumoAuth
+
+AGENT_ID = "agt_0123456789abcdef"
+AUDIENCE = f"https://app.lumoauth.dev/orgs/acme-corp/api/v1/agents/{AGENT_ID}"
+
+
+def github_oidc_token() -> str:
+    """A new OIDC token of the GitHub Actions job, for the agent's audience."""
+    answer = requests.get(
+        os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"],
+        params={"audience": AUDIENCE},
+        headers={"Authorization": f"Bearer {os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}"},
+        timeout=10,
+    )
+    answer.raise_for_status()
+    return answer.json()["value"]
+
+
+lumo = LumoAuth(org_id="acme-corp")   # no credential needed
+result = lumo.agents.attest(AGENT_ID, github_oidc_token(), scopes=["orders:read"])
+
+api = LumoAuth(org_id="acme-corp", token_provider=lambda: result.access_token)
+```
+
+- `result` is a `WorkloadAttestation`: `access_token`, `token_type`,
+  `expires_in` (900 seconds), `scope` and `scopes`, and `identity` (the
+  verified workload: `provider`, `subject`, `issuer`).
+- `scopes` asks for fewer values than the agent's capabilities. Each value
+  must be covered by a capability, or LumoAuth answers 400 `invalid_scope`.
+  Without it the token carries every capability.
+- `dpop=` (a `DpopProofSigner`) binds the token to a key. An agent
+  registered with DPoP-bound tokens needs it.
+- The request carries no credential of the client: the OIDC token is the
+  proof. A refused token raises `LumoAuthAuthenticationError` with the code
+  `attestation_rejected`. LumoAuth gives this one answer for an unknown
+  agent, an inactive agent and a token that failed verification.
+- Each token counts against the agent's budget. A spent budget raises
+  `LumoAuthBudgetExceededError`.
+- LumoAuth accepts each OIDC token once. Fetch a new one for every
+  attestation: a token file that the platform has not renewed yet, such as
+  a Kubernetes projected token, is refused the second time. Attest again
+  before the access token expires.
+
 ### DPoP-bound tokens
 
 [DPoP](https://www.rfc-editor.org/rfc/rfc9449) (RFC 9449) binds a token to a
@@ -1179,10 +1416,11 @@ requests.post("https://mcp.example.com/mcp", headers=headers, json=body)
   token and `"Bearer"` otherwise. A bound token travels as `Authorization:
   DPoP …`, never as `Bearer`.
 - Call `headers()` once per request. A proof is good for one request only.
-- For an endpoint that the SDK does not wrap, such as the attestation
-  endpoint, `agent.dpop_headers("POST", url)` gives the `Authorization` and
-  `DPoP` headers for the agent's own token, and `agent.dpop_proof("POST",
-  url)` gives a bare proof.
+- For an endpoint that the SDK does not wrap,
+  `agent.dpop_headers("POST", url)` gives the `Authorization` and `DPoP`
+  headers for the agent's own token, and `agent.dpop_proof("POST", url)`
+  gives a bare proof. Workload attestation takes a signer:
+  `client.agents.attest(..., dpop=signer)`.
 - On a plain `LumoAuth` client, pass a signer to the token-endpoint flows:
   `client.auth.client_credentials(..., dpop=signer)`,
   `client.auth.token_exchange(..., dpop=signer)` and
@@ -1278,6 +1516,52 @@ Behind a reverse proxy, pass `request_url=` to rebuild the public URL that
 the client signed into the proof. Verification needs the `cryptography`
 package: `pip install "lumoauth[verify]"`.
 
+### Verify a JIT token in your API
+
+A JIT token is the approval of one [Just-in-Time request](#just-in-time-permissions).
+It is not an access token: its header `typ` is `JWT`, its `aud` is the
+organization slug, and the approval is in `permissions.authorization_details`.
+`verify_access_token()` refuses it. Use `verify_jit_token()`:
+
+```python
+from lumoauth import LumoAuthTokenError, verify_jit_token
+
+try:
+    approval = verify_jit_token(
+        jit_token,
+        issuer="https://app.lumoauth.dev/orgs/acme-corp/api/v1",
+        caller=claims,   # the verified access token of the same request, optional
+    )
+except LumoAuthTokenError as err:
+    ...  # err.code: JIT_TOKEN_INVALID or JIT_TOKEN_NOT_FOR_CALLER
+
+if not approval.covers("file_access", actions=["read"], identifier="report_2024.pdf"):
+    ...  # the approval does not allow this action
+```
+
+The checks:
+
+- The signature verifies with a key of the organization's JWKS (RS256 to
+  RS512, PS256 to PS512, ES256 to ES512; `kid` required).
+- `iss` is the organization's issuer, `aud` is the organization slug (taken
+  from the issuer, or from `org_id=`; with `custom_domain=` pass `org_id`),
+  `jit` is `true`, and `exp`, `nbf` and `iat` hold with 60 seconds of leeway.
+- `permissions` names the agent (`agent_id`) and holds at least one approved
+  entry.
+- With `caller`: the token's `sub` is the caller's `sub`, and its agent is the
+  caller's agent (`act.sub` of a delegated token, else `sub`). An approval
+  that an agent got for itself is refused in a call that it makes for a user,
+  and the reverse.
+
+`approval.covers()` applies the matching of RFC 9396: the same `type` (or
+`*`), every requested action and location (or `*`), and the same
+`identifier` (or `*`). The result also has `subject`, `agent_id`, `exp`,
+`jti`, `task_id`, `request_id` and `claims`. The token is not checked for
+revocation: for an action with consequences, also introspect it, as
+[the JIT guide](https://docs.lumoauth.dev/agents/jit#validate-a-jit-token-in-your-api)
+describes. `JitTokenVerifier(issuer, *, org_id=None, custom_domain=None,
+jwks=None, fetch=None, clock_skew=60)` keeps its own key cache.
+
 ### Verify requests from personal agents
 
 A personal agent that uses the
@@ -1356,10 +1640,14 @@ def orders(who: PoppyVerification = Depends(poppy.session("orders:read"))):
   wrote for it: its status, each of its headers and its body. `poppy.install(app)`
   registers the handler that sends this response. Call it on every FastAPI
   application that has such routes, including a mounted application.
-- **An SDK error is never relayed.** LumoAuth may be unreachable, or it may
-  answer 401, 403, 404 or 429 about your own application. The SDK raises its
-  usual error, the route does not run, and FastAPI answers with its normal
-  500 response. The error message does not reach the personal agent.
+- **An SDK error is never relayed.** LumoAuth may be unreachable, the
+  protocol may be switched off for the organization (LumoAuth then answers
+  404), or LumoAuth may answer 401, 403 or 429 about your own application. The
+  route does not run, and the personal agent gets `503` with
+  `{"error": "temporarily_unavailable", "error_description": "Requests from
+  personal agents cannot be verified right now."}` and `Cache-Control:
+  no-store`. The cause is logged as a warning on the `lumoauth.fastapi`
+  logger and is not sent to the personal agent.
 - **Use one dependency per route.** LumoAuth accepts a Session JWT for one
   verification. A service that checks one request in several places passes
   `allow_replay=True`.
@@ -1588,18 +1876,27 @@ LumoAuthError                        .message, .code
 │   ├── LumoAuthPermissionDeniedError 403: not allowed; .required_scopes
 │   ├── LumoAuthNotFoundError        404: the resource does not exist
 │   └── LumoAuthRateLimitError       429: too many requests; .retry_after (seconds)
+│       └── LumoAuthBudgetExceededError 429 with the body code budget_exceeded: the agent's budget is used up
 ├── LumoAuthValidationError          bad input, or a response of the wrong shape; .issues
 │   └── LumoAuthTokenError           an access token or DPoP proof failed local verification; .code says why
 ├── LumoAuthConfigError              missing or invalid configuration
 ├── LumoAuthNetworkError             no HTTP response (DNS, TLS, timeout)
 ├── LumoAuthApprovalDeniedError      a person denied an approval
 ├── LumoAuthApprovalTimeoutError     nobody answered an approval in time
-├── LumoAuthApprovalNotDeliveredError no push prompt was sent; .reason, .task_id
-└── LumoAuthBudgetExceededError      the agent's budget is used up
+└── LumoAuthApprovalNotDeliveredError no push prompt was sent; .reason, .task_id
 ```
 
 - `code` is the `code` or `error` field of the response body when it has one.
   Otherwise it is the class default, such as `PERMISSION_DENIED`.
+- The SDK never retries a request by itself: a 429 raises at once.
+  `retry_after` comes from the `Retry-After` header, as a number of seconds or
+  as an HTTP date (then the seconds until that date). It is `None` when the
+  answer has no such header.
+- A 429 whose body code is `budget_exceeded` raises
+  `LumoAuthBudgetExceededError`: a limit of the agent's budget is reached.
+  `retry_after` is the number of seconds until the spent window starts again.
+  The class is a `LumoAuthRateLimitError`, so an `except
+  LumoAuthRateLimitError` clause catches it too.
 - `message` comes from `error_description`, `message`, `detail` or `error`.
 - `body` is the decoded response body.
 
@@ -1654,9 +1951,10 @@ LumoAuth(*, api_key=None, base_url=None, org_id=None, token_provider=None,
 | `authorization_url(*, client_id, redirect_uri, scope="openid profile email", state=None, response_type="code", code_challenge=None, code_challenge_method=None, prompt=None, access_type=None, extra=None)` | Builds the URL for the authorization-code flow | none (no request) |
 | `exchange_code(code, redirect_uri, *, client_id, client_secret=None, code_verifier=None)` | Exchanges an authorization code for tokens | form body |
 | `refresh_token(refresh_token, *, client_id, client_secret=None, scopes=None)` | Refreshes an access token | form body |
-| `client_credentials(client_id, client_secret, scopes=None, dpop=None)` | Client-credentials grant; `dpop` (a `DpopProofSigner`) makes the token DPoP-bound | form body |
-| `token_exchange(subject_token, *, actor_token=None, audience=None, scopes=None, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE, resource=None, dpop=None)` | RFC 8693 token exchange; `resource` becomes `aud`; `dpop` binds the new token | form body |
+| `client_credentials(client_id, client_secret=None, scopes=None, dpop=None, *, client_assertion=None, resource=None)` | Client-credentials grant; `dpop` (a `DpopProofSigner`) makes the token DPoP-bound; `resource` (RFC 8707) becomes the token's `aud` | form body |
+| `token_exchange(subject_token, *, actor_token=None, audience=None, scopes=None, subject_token_type=ACCESS_TOKEN_TYPE, actor_token_type=ACCESS_TOKEN_TYPE, resource=None, dpop=None, client_id=None, client_secret=None, client_assertion=None, client_auth_method="client_secret_basic")` | RFC 8693 token exchange; `resource` becomes `aud`; `dpop` binds the new token; `client_id` with `client_secret` or `client_assertion` authenticates an application | form body, or HTTP Basic |
 | `revoke(token, *, token_type_hint=None, client_id=None, client_secret=None)` | Revokes an access or refresh token | form body |
+| `end_session_url(*, id_token_hint=None, post_logout_redirect_uri=None, state=None)` | Builds the OpenID Connect end-session URL (RP-initiated logout). Send the browser there to end the LumoAuth session | none (no request) |
 | `userinfo(access_token=None)` | OpenID Connect UserInfo | bearer token |
 
 #### `client.permissions`
@@ -1700,11 +1998,12 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 
 | Method | What it does |
 |---|---|
-| `ask(action, context=None)` | Ask API decision `dict` |
+| `ask(action, context=None, *, traceparent=None)` | Ask API decision `dict`; `traceparent` is sent as the W3C header |
 | `is_allowed(action, context=None)` | The decision as a `bool` |
 | `me()` (alias `get_current()`) | `identity`, `capabilities` and `workspace` |
 | `authorize_mcp_tool(server_id, tool)` | Asks whether the calling agent may run a tool on a registered MCP server; returns `AgentMcpToolDecision`, with `allowed=False` for a deny |
 | `register(name, *, client_id, description=None, capabilities=None, jwks_uri=None)` | Creates or updates an agent record; a user token needs `admin:agents:write` |
+| `attest(agent_id, attestation_token, *, scopes=None, dpop=None)` | Workload attestation: exchanges the workload's OIDC token for an access token of the agent and returns `WorkloadAttestation` (`access_token`, `token_type`, `expires_in`, `scope`, `scopes`, `identity`, `raw`). Sends no credential of the client |
 | `info()` | The userinfo claims of the agent |
 | `capabilities()` | The agent's capability slugs |
 | `budget()` | The agent's budget policy (`{}` when none) |
@@ -1734,8 +2033,8 @@ needs `authz:check`. Passing both raises `LumoAuthValidationError`.
 
 | Method | What it does |
 |---|---|
-| `consent_url(*, client_id, redirect_uri, scopes=None, state=None)` | Consent URL with `prompt=consent` and `access_type=offline` |
-| `exchange_code(code, redirect_uri, *, client_id, client_secret=None)` | Redeems the consent code |
+| `consent_url(*, client_id, redirect_uri, scopes=None, state=None, code_challenge=None)` | Consent URL for an application's `client_id`; with `code_challenge` it carries PKCE S256 (and no `prompt` / `access_type`), without it `prompt=consent` and `access_type=offline` |
+| `exchange_code(code, redirect_uri, *, client_id, client_secret=None, code_verifier=None)` | Redeems the consent code as the application |
 | `refresh_user_token(refresh_token, *, client_id, client_secret=None)` | Refreshes the user's token |
 | `exchange(subject_token, actor_token, scopes=None, *, resource=None)` | Creates a delegated token |
 | `revoke(token, *, token_type_hint="refresh_token", client_id=None, client_secret=None)` | Revokes a delegation |
@@ -1789,12 +2088,12 @@ LumoAuthAgent(base_url=None, org_id=None, client_id=None, client_secret=None,
 | `get_agent_info()` | Identity, capabilities and budget from userinfo |
 | `has_capability(capability)` | `True` when the agent has the capability |
 | `get_budget_status()`, `is_budget_exhausted()` | Budget policy, and whether today's budget is used up |
-| `ask(action, context=None)`, `is_allowed(...)` | Ask API |
+| `ask(action, context=None, *, traceparent=None)`, `is_allowed(...)` | Ask API |
 | `get_identity()` | `GET /agents/me` |
 | `authorize_mcp_tool(server_id, tool)` | Asks whether this agent may run a tool on a registered MCP server; returns `AgentMcpToolDecision` |
 | `api_request(method, endpoint, *, data=None, json=None, params=None, timeout=30)` | Authenticated request; returns `requests.Response` |
 | `register(name, description=None, capabilities=None, jwks_uri=None)` | Creates or updates the agent record |
-| `get_mcp_token(mcp_server_id)` | MCP token bound to the server's https URL, or `None` when the exchange fails; DPoP-bound when the agent has `dpop` |
+| `get_mcp_token(mcp_server_id)` | MCP token bound to the server's https URL, or `None` (deprecated, with a `FutureWarning`) when the exchange fails; DPoP-bound when the agent has `dpop`. Prefer `get_mcp_credential()` |
 | `get_mcp_credential(mcp_server_id)` | The same exchange as an `McpToken` (`token_type`, `expires_in`, `headers(method, url)`); raises on failure |
 | `dpop`, `dpop_headers(method, url, *, access_token=None)`, `dpop_proof(method, url, *, access_token=None)` | The agent's `DpopProofSigner`; `Authorization: DPoP` plus a `DPoP` proof for one request; a bare proof |
 | `jit`, `delegation`, `mcp`, `approvals` | The same namespaces as on `LumoAuth`, with the agent's token |
@@ -1820,18 +2119,18 @@ JITContext(agent, *, delegated_token=None)
 ### `DelegationChain`
 
 ```python
-DelegationChain(agent, *, redirect_uri=None)
+DelegationChain(agent, *, redirect_uri=None, app_client_id=None, app_client_secret=None)
 ```
 
 | Member | What it does |
 |---|---|
-| `get_consent_url(session_id, scopes=None, state=None)` | Builds the consent URL |
-| `handle_consent_callback(session_id, authorization_code)` | Redeems the authorization code |
+| `get_consent_url(session_id, scopes=None, state=None, *, offline_access=False)` | Builds the consent URL for the application, with PKCE |
+| `handle_consent_callback(session_id, authorization_code, *, state=None)` | Redeems the authorization code as the application |
 | `set_user_token(session_id, access_token)` | Uses a user token that you already hold |
 | `exchange(session_id, scopes=None, *, resource=None)` | Returns a delegated token |
 | `request(session_id, method, endpoint, *, data=None, params=None, timeout=30)` | Request with the delegated token |
 | `delegate_to_sub_agent(session_id, sub_agent_token, scopes=None, *, resource=None)` | Nested delegation |
-| `revoke(session_id)`, `revoke_all()` | Revokes delegations |
+| `revoke(session_id)`, `revoke_all()` | Revokes the person's refresh token as the application (`True`), or only forgets the session (`False`) |
 | `active_sessions`, `has_delegation(session_id)` | Session state |
 | `parse_actor_chain(token)`, `get_subject(token)` *(static)* | Inspect a delegated JWT |
 
@@ -1880,6 +2179,9 @@ a query string.
 | `DpopRequest(method, url, proof, scheme="DPoP", nonce=None)` | What the incoming request carried, for the DPoP check |
 | `InMemoryReplayCache`, `ReplayCache` | The default `jti` cache, and the protocol (`check_and_add(key, ttl) -> bool`) for your own |
 | `JwksCache(issuer, *, jwks=None, fetch=None, jwks_uri=None, ttl=3600)` | Discovery plus JWKS cache with one refetch on an unknown `kid` |
+| `verify_jit_token(token, *, issuer=None, org_id=None, custom_domain=None, caller=None, jwks=None, fetch=None, clock_skew=60, now=None)` | Verifies a LumoAuth JIT token; returns `JitTokenClaims` or raises `LumoAuthTokenError` (`JIT_TOKEN_INVALID`, `JIT_TOKEN_NOT_FOR_CALLER`) |
+| `JitTokenVerifier(issuer=None, *, org_id=None, custom_domain=None, jwks=None, fetch=None, clock_skew=60)` | A JIT token verifier with its own JWKS cache; `verify(token, *, caller=None)` |
+| `JitTokenClaims` | `authorization_details`, `covers(type, *, actions=None, locations=None, identifier=None)`, `subject`, `agent_id`, `exp`, `jti`, `task_id`, `request_id`, `claims` |
 
 ### Helpers
 
@@ -1893,19 +2195,23 @@ a query string.
 
 | Name | What it does |
 |---|---|
-| `lumo_auth_router(*, base_url=None, organization=None, client_id, client_secret=None, callback_path="/auth/callback", scope="openid profile email", post_login_redirect="/", post_logout_redirect="/", custom_domain=None)` | Router with `/login`, `/callback` and `/logout`. Pass `base_url` and `organization`, or `custom_domain` |
+| `lumo_auth_router(*, base_url=None, organization=None, client_id, client_secret=None, callback_path="/auth/callback", scope="openid profile email", post_login_redirect="/", post_logout_redirect="/", custom_domain=None, end_session_on_logout=True)` | Router with `/login`, `/callback` and `/logout`. Pass `base_url` and `organization`, or `custom_domain`. `/logout` ends the LumoAuth session too, unless `end_session_on_logout=False` |
+| `LumoAuthFastAPI(base_url=None, organization=None, client_id, client_secret=None, …, end_session_on_logout=True)` | The same options as `lumo_auth_router()`, as an object |
+| `lumo.router()` | Builds the router from the configuration |
+| `lumo.access_token(request)` | Dependency that returns the user's access token, refreshed when it expires in less than 60 seconds; answers 401 or 503 |
+| `lumo.end_session_url(*, id_token_hint=None, post_logout_redirect_uri=None, state=None)` | The end-session URL of the organization |
 | `get_current_user(request)` | Dependency that returns `User` or `None` |
 | `require_auth(scopes=None)` | Dependency factory that answers 401 or 403 |
 | `require_access_token(*, issuer=None, resource, scopes=None, require_dpop=False, verifier=None, jwks=None, fetch=None, clock_skew=60, replay_cache=None, request_url=None, custom_domain=None)` | Dependency factory for resource servers: verifies the incoming LumoAuth token (and its DPoP proof) and returns `AccessTokenClaims`; answers 401 with `WWW-Authenticate` or 403 `insufficient_scope` |
 | `parse_authorization(value)` | Splits an `Authorization` header into `("Bearer" or "DPoP", token)` |
 | `User` | Pydantic model of the signed-in user |
-| `LumoAuthFastAPI` | Configuration container |
 | `LumoAuthPoppy(client, *, public_origin)` | Helper for routes that personal agents call. `client` is a `LumoAuth` client with `client_id` and `client_secret`; a missing `public_origin` raises `LumoAuthConfigError` |
 | `poppy.install(app)` | Registers the handler that relays a refusal; call it once on each application |
 | `poppy.session(required_scope=None, *, resource=None, allow_replay=False)` | Dependency factory: returns the `PoppyVerification` of a verified request (also `request.state.poppy`); a refusal is relayed unchanged and the route does not run |
 | `poppy.verify(request, *, required_scope=None, resource=None, allow_replay=False)` | Verifies a request and returns the `PoppyVerification`, verified or refused |
 | `poppy_refusal_response(verification)` | Builds the response for a refusal: its status, headers and body, unchanged |
 | `PoppyRefusal`, `poppy_refusal_handler` | The exception that the dependency raises for a refusal, and its handler |
+| `PoppyUnavailable`, `poppy_unavailable_response()` | The exception (a `PoppyRefusal`, with `cause`) for a request that could not be verified at all, and its `503` answer |
 
 ## Troubleshooting
 
@@ -1923,12 +2229,16 @@ a query string.
 | 403 `test_token_not_accepted` from approvals | The agent uses a portal test token | Use the agent's real credentials |
 | `require_approval()` returns status `pending` | `timeout_s` passed before anybody answered | Raise `timeout_s`, or poll later with `approvals.get_status()` |
 | `LumoAuthRateLimitError` (429) | Too many requests | Wait `err.retry_after` seconds, then retry |
+| `LumoAuthBudgetExceededError` (429, code `budget_exceeded`) | The agent used up a limit of its budget | Wait `err.retry_after` seconds (the start of the next window), or raise the limit on the agent |
 | `LumoAuthConfigError: org_id is required` | The call is org-scoped and no slug is set | Pass `org_id` or set `LUMOAUTH_ORG_ID`. For an organization on its own domain, pass `custom_domain` |
 | Every call to an organization on its own domain answers 404 | The domain is set as `base_url`, so the paths carry `/orgs/...` | Pass the domain as `custom_domain`, not as `base_url` |
 | `authenticate()` returns `False` | Wrong client ID or secret, or the agent is suspended | Check the credentials; the log contains the HTTP status |
 | FastAPI `/auth/login` answers 500 `session_middleware_missing` | `SessionMiddleware` is not added | Add `SessionMiddleware` before the router |
+| After `/auth/logout` the user stays on LumoAuth's signed-out page | The absolute form of `post_logout_redirect` is not a registered post-logout redirect URI of the application | Add it under **Logout** in the application's configuration |
+| The sign-in completes, but the next page is signed out again; the log shows a warning from `lumoauth.fastapi` about the cookie size | The session cookie is larger than the 4096 bytes that browsers keep | Request fewer scopes, or use a session middleware that keeps the data on the server |
 | `LumoAuthPermissionDeniedError` (`insufficient_scope`) from a `client.poppy` call | The application lacks the `poppy:verify` scope | Add `poppy:verify` to the allowed scopes of the application |
 | Every request of a personal agent is refused with `invalid_session`, and the description names another URL (`htu`) | `public_origin` is not the address that the personal agent called | Set `public_origin` to the public address, with the path prefix that your proxy removes |
+| A route with `poppy.session()` answers 503 `temporarily_unavailable`, and the log shows a warning from `lumoauth.fastapi` | LumoAuth could not verify the request: the protocol is off for the organization (404), the application lacks `poppy:verify`, or LumoAuth is out of reach | Read the cause in the warning: switch the protocol on, or fix the application |
 | A route with `poppy.session()` answers 500, and the log shows `LumoAuthConfigError` about the refusal handler | `poppy.install(app)` was not called on the application that serves the route | Call `poppy.install(app)`, also on a mounted application |
 
 ## Versioning and compatibility
@@ -1966,6 +2276,79 @@ They are skipped when neither exists.
 
 ### Unreleased
 
+- `DelegationChain` takes `app_client_id` and `app_client_secret`: the
+  application that the person consents to. `get_consent_url()` then builds
+  the URL with the application's client ID, PKCE (S256), a random `state`
+  and `openid` (`offline_access=True` asks for a refresh token);
+  `handle_consent_callback(..., state=)` redeems the code as the application;
+  the application refreshes the person's token. Earlier releases used the
+  agent's ID, which LumoAuth refuses; without `app_client_id` that path is
+  kept with a `FutureWarning`. `revoke()` revokes the person's refresh token
+  as the application and returns `True`; without the application's
+  credentials or a refresh token it only forgets the session, logs a
+  warning and returns `False` (earlier releases always returned `True`).
+  `client.delegation.consent_url()` takes `code_challenge`, and
+  `exchange_code()` takes `code_verifier`.
+- New `verify_jit_token()`, `JitTokenVerifier` and `JitTokenClaims` in
+  `lumoauth.verify` (also exported from `lumoauth`): local verification of a
+  JIT token (`typ` `JWT`, `aud` = the organization), with `covers()` for the
+  approved `authorization_details` and an optional check that the approval
+  belongs to the caller. The rules are the same as in `lumoauth-fastmcp`.
+- FastAPI `LumoAuthPoppy`: when the request cannot be verified at all
+  (LumoAuth out of reach, protocol switched off, the application's own call
+  refused), the route answers `503` `temporarily_unavailable` with
+  `Cache-Control: no-store` and logs the cause. Earlier releases answered 500.
+- `client.auth.token_exchange()` can authenticate the application:
+  `client_id` with `client_secret` (HTTP Basic, or `client_auth_method=
+  "client_secret_post"`) or with `client_assertion` (`private_key_jwt`).
+  Earlier releases sent no client authentication, so only agents could use
+  the call.
+- `MAX_DELEGATION_DEPTH` is now 5, as LumoAuth enforces (a chain holds at
+  most five actors). A deeper exchange in `DelegationChain` raises
+  `LumoAuthApiError` (400 `invalid_request`) whose message starts with
+  "Delegation chain too deep (max depth: 5)".
+- `retry_after` of a 429 error also reads a `Retry-After` header in the HTTP
+  date form (RFC 9110), as the seconds until that date. Earlier releases
+  gave `None` for it.
+- `agent.get_mcp_token()` still returns `None` when the exchange fails, but
+  now also issues a `FutureWarning` with the reason. Returning `None` is
+  deprecated; use `get_mcp_credential()`, which raises.
+- `LumoAuthAgent.ask()`, `is_allowed()` and `client.agents.ask()` take
+  `traceparent=`: the W3C header is sent with the request, so that the audit
+  entries of the decision carry your trace ID.
+- New `client.agents.attest(agent_id, attestation_token, *, scopes=None,
+  dpop=None)` for workload attestation. It returns the new
+  `WorkloadAttestation`. New `resource` argument on
+  `client.auth.client_credentials()` (RFC 8707): the token's `aud` is then
+  that address.
+- A 429 with the body code `budget_exceeded` now raises
+  `LumoAuthBudgetExceededError`, which is now a subclass of
+  `LumoAuthRateLimitError` (status 429, `retry_after`). Earlier releases
+  raised `LumoAuthRateLimitError` and never raised the budget error. `except
+  LumoAuthRateLimitError` still catches it, and `code` stays
+  `budget_exceeded`.
+- FastAPI: the login route of `lumo_auth_router()` passes the query
+  parameters `acr_values`, `max_age`, `resource`, `login_hint` and `prompt`
+  on to LumoAuth (an allow-list, each value checked), for step-up and for a
+  token for one API.
+- FastAPI: `/auth/logout` of `lumo_auth_router()` now also ends the user's
+  LumoAuth session. It revokes the refresh token and redirects through the
+  end-session endpoint with `id_token_hint`; a relative
+  `post_logout_redirect` is made absolute with the request's address, and it
+  must be a registered post-logout redirect URI of the application. Earlier
+  releases cleared only the local session, so the next sign-in completed
+  without the sign-in page. `end_session_on_logout=False` keeps the old
+  behaviour. New `client.auth.end_session_url()` builds the end-session URL.
+  New `LumoAuthFastAPI.router()` and the dependency
+  `LumoAuthFastAPI.access_token`, which refreshes the access token when it
+  expires. The session no longer keeps `token_type`, keeps the ID token only
+  when the sign-out needs it, and now keeps `expires_at`. A warning is logged
+  when Starlette's session cookie passes 4096 bytes. Upgrade note: an own
+  sign-out route that reads `session["__lumoauth"]["tokens"]["id_token"]`
+  (as the FastAPI quickstart for 1.7.0 shows) keeps working, because the ID
+  token stays at that key unless you pass `end_session_on_logout=False`. You
+  can remove such a route and link to `/auth/logout` instead; then register
+  the absolute form of `post_logout_redirect` as a post-logout redirect URI.
 - New: custom domains. An organization can serve LumoAuth on its own domain,
   such as `https://auth.acme.com`. Pass `custom_domain=` to `LumoAuth`,
   `LumoAuthAgent`, `AAuthClient`, `verify_access_token()`,

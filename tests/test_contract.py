@@ -82,6 +82,28 @@ def test_error_taxonomy_matches_the_contract() -> None:
         assert isinstance(e, Exception)
 
 
+def test_body_codes_raise_the_contract_class() -> None:
+    """A status of http_status_map with a body code of body_code_map raises that class."""
+    from conftest import FakeResponse, FakeSession
+    from lumoauth._http import HttpClient
+
+    spec = _load("errors.json")
+    body_codes = spec.get("body_code_map", {})
+    assert body_codes, "errors.json has no body_code_map"
+    parents = {e["name"]: e for e in spec["errors"]}
+    for body_code, name in body_codes.items():
+        entry = parents[name]
+        session = FakeSession()
+        session.queue(FakeResponse(entry["status"], {"error": body_code}, headers={"Retry-After": "7"}))
+        with pytest.raises(getattr(errors, name)) as caught:
+            HttpClient("https://auth.example.com", session=session).request("GET", "/x")
+        # The class the status alone maps to still catches it.
+        status_class = spec["http_status_map"][str(entry["status"])]
+        assert isinstance(caught.value, getattr(errors, status_class)), f"{name} is not a {status_class}"
+        if "retryAfter" in entry.get("extra", []):
+            assert caught.value.retry_after == 7.0
+
+
 def test_token_exchange_types_match_the_contract() -> None:
     types = _load("token-types.json")["types"]
     for key, spec in types.items():

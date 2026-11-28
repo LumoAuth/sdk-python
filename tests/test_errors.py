@@ -16,6 +16,7 @@ from lumoauth.errors import (
     LumoAuthNotFoundError,
     LumoAuthPermissionDeniedError,
     LumoAuthRateLimitError,
+    LumoAuthBudgetExceededError,
 )
 
 BASE = "https://auth.example.com"
@@ -93,6 +94,82 @@ def test_rate_limit_error_parses_retry_after():
     with pytest.raises(LumoAuthRateLimitError) as exc_info:
         client.request("GET", "/thing")
     assert exc_info.value.retry_after == 12.0
+    assert not isinstance(exc_info.value, LumoAuthBudgetExceededError)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("12", 12.0),
+        (" 0 ", 0.0),
+        ("1.5", 1.5),
+        # RFC 9110: an HTTP date in each of its three forms; the time is 100 s ahead.
+        ("Fri, 27 Nov 2026 18:01:40 GMT", 100.0),
+        ("Friday, 27-Nov-26 18:01:40 GMT", 100.0),
+        ("Fri Nov 27 18:01:40 2026", 100.0),
+        # A date in the past means "now".
+        ("Fri, 27 Nov 2026 17:00:00 GMT", 0.0),
+        ("-5", None),
+        ("soon", None),
+        ("", None),
+        (None, None),
+        ("inf", None),
+    ],
+)
+def test_retry_after_accepts_seconds_and_http_dates(value, expected):
+    from lumoauth._http import _parse_retry_after
+
+    now = 1795802400.0  # Fri, 27 Nov 2026 18:00:00 GMT
+    assert _parse_retry_after(value, now=now) == expected
+
+
+def test_rate_limit_error_reads_an_http_date():
+    import email.utils
+    import time
+
+    client, session = make_client()
+    later = email.utils.formatdate(time.time() + 120, usegmt=True)
+    session.queue(FakeResponse(429, {"error": "rate_limit_exceeded"}, headers={"Retry-After": later}))
+    with pytest.raises(LumoAuthRateLimitError) as exc_info:
+        client.request("GET", "/thing")
+    assert 110 <= exc_info.value.retry_after <= 120
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The agent endpoints (Ask, token, JIT, attestation).
+        {"error": "budget_exceeded", "error_description": "Agent budget exceeded"},
+        # The Admin API envelope.
+        {"error": "budget_exceeded", "message": "Agent budget exceeded", "status": 429},
+    ],
+)
+def test_spent_budget_raises_the_budget_error(body):
+    client, session = make_client()
+    session.queue(FakeResponse(429, body, headers={"Retry-After": "3600"}))
+    with pytest.raises(LumoAuthBudgetExceededError) as exc_info:
+        client.request("POST", "/orgs/acme/api/v1/agents/ask")
+    err = exc_info.value
+    # Still a rate-limit error, so older except clauses keep catching it.
+    assert isinstance(err, LumoAuthRateLimitError)
+    assert (err.status_code, err.code, err.retry_after) == (429, "budget_exceeded", 3600.0)
+    assert err.message == "Agent budget exceeded"
+    assert err.body == body
+
+
+def test_budget_code_on_another_status_is_not_the_budget_error():
+    client, session = make_client()
+    session.queue(FakeResponse(403, {"error": "budget_exceeded"}))
+    with pytest.raises(LumoAuthPermissionDeniedError) as exc_info:
+        client.request("GET", "/thing")
+    assert not isinstance(exc_info.value, LumoAuthBudgetExceededError)
+
+
+def test_budget_error_without_a_response_has_the_contract_defaults():
+    err = LumoAuthBudgetExceededError()
+    assert (err.code, err.status_code, err.retry_after) == ("BUDGET_EXCEEDED", 429, None)
+    assert isinstance(err, LumoAuthRateLimitError)
+    assert LumoAuthBudgetExceededError("spent").message == "spent"
 
 
 # ── Success handling ──────────────────────────────────────────────────

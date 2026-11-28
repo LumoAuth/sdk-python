@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
+import secrets
 import time
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+import warnings
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import requests
 
@@ -43,8 +47,12 @@ class DelegationChain:
     ``DelegationChain`` wraps a :class:`~lumoauth.LumoAuthAgent` and provides
     the full delegation lifecycle:
 
-    1. **User consent** — generate an authorization URL and exchange the
-       callback code for user tokens.
+    1. **User consent** — the person consents to an *application* of the
+       organization (never to the agent): :meth:`get_consent_url` builds the
+       authorization URL with the application's client ID and PKCE, and
+       :meth:`handle_consent_callback` redeems the code as the application.
+       Or register a token that your application already holds with
+       :meth:`set_user_token`.
     2. **Token exchange** — combine the agent's token (actor) with the
        user's token (subject) to produce a delegated token carrying an
        ``act`` claim.
@@ -52,7 +60,8 @@ class DelegationChain:
        so every action is attributed to both agent and user.
     4. **Nested delegation** — pass authority down to sub-agents, each
        level adding to the ``act`` chain.
-    5. **Revocation** — invalidate all tokens for a delegation session.
+    5. **Revocation** — revoke the person's refresh token as the
+       application, which ends every delegated token of that grant.
 
     Example::
 
@@ -62,10 +71,16 @@ class DelegationChain:
         agent = LumoAuthAgent()
         agent.authenticate()
 
-        chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
+        chain = DelegationChain(
+            agent,
+            redirect_uri="https://app.example.com/callback",   # registered on the application
+            app_client_id="client_…",                          # the application, not the agent
+            app_client_secret="…",                             # for a confidential application
+        )
+        url = chain.get_consent_url("session_1", scopes=["documents:read"], offline_access=True)
 
-        # After user completes consent flow:
-        chain.handle_consent_callback("session_1", authorization_code)
+        # After the person consented and came back to redirect_uri:
+        chain.handle_consent_callback("session_1", authorization_code, state=returned_state)
         token = chain.exchange("session_1", scopes=["documents:read"])
 
         # Make delegated API calls
@@ -77,15 +92,28 @@ class DelegationChain:
         agent: _AgentLike,
         *,
         redirect_uri: str | None = None,
+        app_client_id: str | None = None,
+        app_client_secret: str | None = None,
     ) -> None:
         """Initialise from an authenticated agent.
 
         Args:
             agent: An authenticated :class:`~lumoauth.LumoAuthAgent` instance.
-            redirect_uri: OAuth callback URL for the user consent flow.
+            redirect_uri: A redirect URI registered on the application, for
+                the consent flow.
+            app_client_id: The client ID of the APPLICATION that the person
+                consents to (``client_…``), never the agent's ID. The consent
+                flow, the refresh of the person's token and :meth:`revoke`
+                use it.
+            app_client_secret: The application's secret, for a confidential
+                application. A public application has none (PKCE only).
         """
         self._agent = agent
         self._redirect_uri = redirect_uri or ""
+        self._app_client_id = app_client_id or None
+        self._app_client_secret = app_client_secret or None
+        # PKCE verifier and state of each consent in progress, by session id.
+        self._pending_consents: Dict[str, Tuple[str, str]] = {}
         self._verify_tls: bool = getattr(agent, "_verify_tls", True)
 
         self._http = HttpClient(
@@ -112,20 +140,28 @@ class DelegationChain:
         session_id: str,
         scopes: List[str] | None = None,
         state: str | None = None,
+        *,
+        offline_access: bool = False,
     ) -> str:
-        """Generate a URL where the user can grant the agent permission to act on their behalf.
+        """Build the URL where the person consents, for the agent to act for them.
 
-        This initiates an OAuth 2.0 authorization-code flow.  Redirect the
-        user to the returned URL; after they grant consent they will be
-        sent back to ``redirect_uri`` with an authorization code.
+        The person consents to the application (``app_client_id``): an
+        agent never starts a sign-in. The URL asks for ``openid`` plus
+        *scopes* (and ``offline_access`` when asked), with a PKCE challenge
+        (S256) and a random ``state``. Redirect the person there; LumoAuth
+        sends them back to ``redirect_uri`` with a code for
+        :meth:`handle_consent_callback`.
 
         Args:
             session_id: Caller-defined identifier to correlate the consent
                 with later token-exchange calls.
-            scopes: Scopes the agent is requesting on behalf of the user
-                (e.g. ``["documents:read", "documents:write"]``).
-                Defaults to ``["documents:read"]``.
-            state: CSRF-protection value.  Defaults to ``session:<session_id>``.
+            scopes: Scopes for the agent (``<resource>:<action>``, such as
+                ``["documents:read"]``; the default). The application must be
+                allowed them, and the agent must hold them as capabilities,
+                or the exchange later issues no scope.
+            state: CSRF-protection value. Defaults to a random value.
+            offline_access: Ask for a refresh token as well. It renews the
+                person's token, and :meth:`revoke` needs it.
 
         Returns:
             The full authorization URL to redirect the user to.
@@ -140,13 +176,39 @@ class DelegationChain:
             )
 
         scopes = scopes or ["documents:read"]
-        state = state or f"session:{session_id}"
+        if not self._app_client_id:
+            warnings.warn(
+                "DelegationChain.get_consent_url() without app_client_id builds the URL with "
+                "the agent's ID, which LumoAuth refuses (an agent never starts a sign-in). "
+                "Pass app_client_id (and app_client_secret for a confidential application) "
+                "of the application that the person consents to.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            url = self._resource.consent_url(
+                client_id=self._agent.client_id,
+                redirect_uri=self._redirect_uri,
+                scopes=scopes,
+                state=state or f"session:{session_id}",
+            )
+            logger.info("Consent URL generated (session=%s, scopes=%s)", session_id, scopes)
+            return url
 
+        state = state or secrets.token_urlsafe(24)
+        verifier = secrets.token_urlsafe(48)
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        )
+        self._pending_consents[session_id] = (verifier, state)
+        requested = ["openid", *[s for s in scopes if s != "openid"]]
+        if offline_access and "offline_access" not in requested:
+            requested.append("offline_access")
         url = self._resource.consent_url(
-            client_id=self._agent.client_id,
+            client_id=self._app_client_id,
             redirect_uri=self._redirect_uri,
-            scopes=scopes,
+            scopes=requested,
             state=state,
+            code_challenge=challenge,
         )
         logger.info(
             "Consent URL generated (session=%s, scopes=%s)",
@@ -159,29 +221,54 @@ class DelegationChain:
         self,
         session_id: str,
         authorization_code: str,
+        *,
+        state: str | None = None,
     ) -> bool:
-        """Exchange an authorization code from the consent callback for user tokens.
+        """Redeem the code of the consent callback as the application.
 
-        Call this when the user is redirected back to your ``redirect_uri``
-        with an authorization code.
+        Call this when the person comes back to your ``redirect_uri`` with a
+        code. The application redeems it (its client ID, its secret when it
+        is confidential, and the PKCE verifier of :meth:`get_consent_url`);
+        the agent's credentials play no part. The person's tokens are the
+        application's tokens.
 
         Args:
             session_id: The same identifier used in :meth:`get_consent_url`.
             authorization_code: The ``code`` query-string parameter from the
                 callback URL.
+            state: The ``state`` query-string parameter. When given, it must
+                be the value of :meth:`get_consent_url`.
 
         Returns:
             ``True`` on success, ``False`` on failure (details logged).
         """
         logger.info("Exchanging authorization code for user tokens (session=%s)", session_id)
 
-        try:
-            body = self._resource.exchange_code(
-                authorization_code,
-                self._redirect_uri,
-                client_id=self._agent.client_id,
-                client_secret=self._agent.client_secret,
+        if self._app_client_id:
+            pending = self._pending_consents.pop(session_id, None)
+            if pending is None:
+                logger.error("No consent in progress for session %s", session_id)
+                return False
+            verifier, expected_state = pending
+            if state is not None and not secrets.compare_digest(state, expected_state):
+                logger.error("Consent callback state does not match (session=%s)", session_id)
+                return False
+            redeem = dict(
+                client_id=self._app_client_id,
+                client_secret=self._app_client_secret,
+                code_verifier=verifier,
             )
+        else:
+            warnings.warn(
+                "DelegationChain.handle_consent_callback() without app_client_id redeems the "
+                "code with the agent's credentials, which LumoAuth refuses. Pass app_client_id.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            redeem = dict(client_id=self._agent.client_id, client_secret=self._agent.client_secret)
+
+        try:
+            body = self._resource.exchange_code(authorization_code, self._redirect_uri, **redeem)
         except LumoAuthApiError as exc:
             logger.error(
                 "Consent code exchange failed: HTTP %s — %s",
@@ -345,8 +432,9 @@ class DelegationChain:
         The resulting token represents the chain:
         **user → this agent → sub-agent**.
 
-        Each level of delegation reduces available scopes.  LumoAuth
-        enforces a maximum depth of ``MAX_DELEGATION_DEPTH`` levels.
+        Each level of delegation reduces available scopes. A chain holds at
+        most ``MAX_DELEGATION_DEPTH`` (5) actors; LumoAuth refuses a deeper
+        one with 400 ``invalid_request``.
 
         Args:
             session_id: Session with the original user delegation.
@@ -361,8 +449,10 @@ class DelegationChain:
             A delegated access token for the sub-agent.
 
         Raises:
-            LumoAuthApiError: If the nested exchange fails or the delegation
-                chain is too deep (subclasses ``RuntimeError``).
+            LumoAuthApiError: If the nested exchange fails, or the delegation
+                chain would hold more than ``MAX_DELEGATION_DEPTH`` actors
+                (status 400, code ``invalid_request``, message starting with
+                "Delegation chain too deep"). Subclasses ``RuntimeError``.
         """
         our_token = self._delegated_tokens.get(session_id)
         if not our_token:
@@ -427,43 +517,65 @@ class DelegationChain:
     # =========================================================================
 
     def revoke(self, session_id: str) -> bool:
-        """Revoke the delegation for a session.
+        """End the delegation of a session.
 
-        Invalidates the refresh token at the LumoAuth server (which also
-        invalidates all derived tokens) and clears local state.
+        With ``app_client_id`` and a refresh token of the person (from a
+        consent with ``offline_access``), the application revokes that
+        refresh token at LumoAuth (``/oauth/revoke``). That ends the whole
+        grant, including every delegated token that the agent got from it.
+
+        Otherwise nothing can be revoked at LumoAuth by this SDK: the agent's
+        own credentials cannot revoke the application's token. The method
+        then only forgets the session's tokens here, logs a warning and
+        returns ``False``. The delegated token stays valid until it expires
+        (at most the lifetime of the person's token). The person can end it
+        on their account page ("AI agents acting for you"), or your
+        application can revoke the person's refresh token.
 
         Args:
             session_id: The session to revoke.
 
         Returns:
-            ``True`` on success or if nothing to revoke.
+            ``True`` when LumoAuth revoked the grant, or when the session is
+            unknown; ``False`` when only local state was forgotten, or the
+            revocation request failed.
         """
         user = self._user_tokens.get(session_id)
         if not user:
             self._delegated_tokens.pop(session_id, None)
+            self._pending_consents.pop(session_id, None)
             return True
 
         logger.info("Revoking delegation (session=%s)", session_id)
-
-        if user.refresh_token:
-            try:
-                self._resource.revoke(
-                    user.refresh_token,
-                    token_type_hint="refresh_token",
-                    client_id=self._agent.client_id,
-                    client_secret=self._agent.client_secret,
-                )
-            except LumoAuthApiError as exc:
-                logger.warning(
-                    "Revocation request returned HTTP %s (session=%s)",
-                    exc.status_code,
-                    session_id,
-                )
-            else:
-                logger.info("Delegation revoked at server (session=%s)", session_id)
-
         self._user_tokens.pop(session_id, None)
         self._delegated_tokens.pop(session_id, None)
+
+        if not user.refresh_token or not self._app_client_id:
+            logger.warning(
+                "Delegation of session %s was only forgotten locally: %s. Delegated tokens "
+                "stay valid until they expire.",
+                session_id,
+                "no refresh token of the person is held (consent without offline_access, "
+                "or set_user_token())" if not user.refresh_token
+                else "app_client_id is not set, and the agent cannot revoke the application's token",
+            )
+            return False
+
+        try:
+            self._resource.revoke(
+                user.refresh_token,
+                token_type_hint="refresh_token",
+                client_id=self._app_client_id,
+                client_secret=self._app_client_secret,
+            )
+        except LumoAuthApiError as exc:
+            logger.warning(
+                "Revocation request returned HTTP %s (session=%s)",
+                exc.status_code,
+                session_id,
+            )
+            return False
+        logger.info("Delegation revoked at server (session=%s)", session_id)
         return True
 
     def revoke_all(self) -> None:
@@ -514,6 +626,15 @@ class DelegationChain:
                 body=exc.body,
             ) from exc
         except LumoAuthApiError as exc:
+            if exc.status_code == 400 and exc.message.startswith("Delegation chain too deep"):
+                # LumoAuth: 400 invalid_request "Delegation chain too deep: act
+                # nesting depth 6 exceeds the maximum of 5".
+                raise LumoAuthApiError(
+                    f"Delegation chain too deep (max depth: {MAX_DELEGATION_DEPTH}): {exc.message}",
+                    code=exc.code,
+                    status_code=exc.status_code,
+                    body=exc.body,
+                ) from exc
             raise LumoAuthApiError(
                 f"{failed_prefix} (HTTP {exc.status_code}): {exc.message}",
                 code=exc.code,
@@ -547,11 +668,12 @@ class DelegationChain:
         """Refresh the user's access token."""
         logger.info("Refreshing user token (session=%s)", session_id)
 
+        # The person's tokens belong to the application: it refreshes them.
         try:
             body = self._resource.refresh_user_token(
                 user.refresh_token or "",
-                client_id=self._agent.client_id,
-                client_secret=self._agent.client_secret,
+                client_id=self._app_client_id or self._agent.client_id,
+                client_secret=self._app_client_secret if self._app_client_id else self._agent.client_secret,
             )
         except LumoAuthApiError as exc:
             logger.error(

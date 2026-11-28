@@ -265,7 +265,8 @@ def test_get_mcp_token_still_returns_the_string_or_none(agent, fake_session):
     )
     agent.authenticate()
     assert agent.get_mcp_token(MCP_URL) == "mcp-at"
-    assert agent.get_mcp_token(MCP_URL) is None
+    with pytest.warns(FutureWarning):
+        assert agent.get_mcp_token(MCP_URL) is None
     with pytest.raises(LumoAuthApiError):
         agent.get_mcp_credential(MCP_URL)
 

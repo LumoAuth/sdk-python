@@ -498,20 +498,34 @@ def assert_generic_500(r: Any, *secrets: str) -> None:
         assert secret not in r.text
 
 
+def assert_unavailable(r: Any, *secrets: str) -> None:
+    """503 temporarily_unavailable: nothing of LumoAuth's answer, never a 500."""
+    assert r.status_code == 503
+    assert r.json() == {
+        "error": "temporarily_unavailable",
+        "error_description": "Requests from personal agents cannot be verified right now.",
+    }
+    assert r.headers["cache-control"] == "no-store"
+    for name in ("www-authenticate", "retry-after"):
+        assert name not in r.headers
+    for secret in secrets:
+        assert secret not in r.text
+
+
 @needs_vector
 @pytest.mark.parametrize("case", _answer_cases("error"))
-def test_vector_sdk_error_becomes_a_generic_500(case, lumo, fake_session):
+def test_vector_sdk_error_becomes_503_unavailable(case, lumo, fake_session):
     shop = Shop(lumo)
     answer = case["answer"]
     fake_session.queue(FakeResponse(answer["status"], answer["body"], headers=answer["headers"]))
     r = shop.client.get("/api/orders", headers=AGENT_HEADERS)
     description = answer["body"].get("error_description") or "no-description"
-    assert_generic_500(r, description, "poppy:verify", "invalid_client", "LumoAuth")
+    assert_unavailable(r, description, "poppy:verify", "invalid_client", "LumoAuth")
     assert shop.seen == []
     assert len(fake_session.calls) == 1
 
 
-def test_network_error_becomes_a_generic_500(lumo, fake_session, monkeypatch):
+def test_network_error_becomes_503_unavailable(lumo, fake_session, monkeypatch):
     def unreachable(method: str, url: str, **kwargs: Any) -> FakeResponse:
         fake_session.calls.append((method, url, kwargs))
         raise requests.ConnectionError("connection refused: auth.example.com:443")
@@ -519,25 +533,36 @@ def test_network_error_becomes_a_generic_500(lumo, fake_session, monkeypatch):
     monkeypatch.setattr(fake_session, "request", unreachable)
     shop = Shop(lumo)
     r = shop.client.get("/api/orders", headers=AGENT_HEADERS)
-    assert_generic_500(r, "connection refused", "auth.example.com")
+    assert_unavailable(r, "connection refused", "auth.example.com")
     assert shop.seen == []
 
 
-def test_missing_credentials_become_a_generic_500(fake_session):
+def test_missing_credentials_become_503_unavailable(fake_session):
     shop = Shop(LumoAuth(base_url=BASE, org_id=ORG, api_key="lmk_x"))
     r = shop.client.get("/api/orders", headers=AGENT_HEADERS)
-    assert_generic_500(r, "client_secret", "poppy:verify")
+    assert_unavailable(r, "client_secret", "poppy:verify")
     assert shop.seen == [] and fake_session.calls == []
 
 
-def test_sdk_error_is_raised_to_the_application(lumo, fake_session):
-    """The error reaches FastAPI's error path unchanged, for logs and monitoring."""
+def test_sdk_error_is_logged_for_the_application(lumo, fake_session, caplog):
+    """The cause goes to the application's log, never to the personal agent."""
+    import logging
+
     shop = Shop(lumo)
     fake_session.queue(FakeResponse(403, {"error": "insufficient_scope"}))
-    from lumoauth.errors import LumoAuthPermissionDeniedError
+    with caplog.at_level(logging.WARNING, logger="lumoauth.fastapi"):
+        r = TestClient(shop.app).get("/api/orders", headers=AGENT_HEADERS)
+    assert_unavailable(r, "insufficient_scope")
+    assert shop.seen == []
+    assert any("LumoAuthPermissionDeniedError" in rec.getMessage() for rec in caplog.records)
 
-    with pytest.raises(LumoAuthPermissionDeniedError):
-        TestClient(shop.app).get("/api/orders", headers=AGENT_HEADERS)
+
+def test_switched_off_protocol_is_503_unavailable(lumo, fake_session):
+    """LumoAuth answers 404 not_found while the organization has the protocol off."""
+    shop = Shop(lumo)
+    fake_session.queue(FakeResponse(404, {"error": "not_found"}))
+    r = shop.client.get("/api/orders", headers=AGENT_HEADERS)
+    assert_unavailable(r, "not_found")
     assert shop.seen == []
 
 

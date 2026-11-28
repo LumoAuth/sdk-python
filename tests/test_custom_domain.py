@@ -657,7 +657,7 @@ def test_jit_context_and_delegation_chain_follow_the_agent(agent, fake_session):
         DOMAIN + "/api/v1/jit/task/task_7/complete",
     ]
 
-    chain = DelegationChain(agent, redirect_uri="https://agent.example/cb")
+    chain = DelegationChain(agent, redirect_uri="https://app.example/cb", app_client_id="client_app")
     assert chain.get_consent_url("s1").startswith(DOMAIN + "/api/v1/oauth/authorize?")
     fake_session.queue(FakeResponse(200, {"access_token": "user-at", "refresh_token": "rt"}))
     chain.handle_consent_callback("s1", "code")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import requests
@@ -403,7 +404,13 @@ class LumoAuthAgent:
     # Ask API — preflight capability checks & self-inspection
     # =========================================================================
 
-    def ask(self, action: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def ask(
+        self,
+        action: str,
+        context: dict[str, Any] | None = None,
+        *,
+        traceparent: str | None = None,
+    ) -> dict[str, Any]:
         """Check whether the agent is authorised to perform *action*.
 
         This calls the ``/agents/ask`` endpoint which is optimised for
@@ -413,6 +420,9 @@ class LumoAuthAgent:
         Args:
             action: The action, written ``<resource>:<action>`` (e.g. ``"document:read"``).
             context: Optional context dict (e.g. ``{"id": "doc_99"}``).
+            traceparent: Optional W3C ``traceparent`` header value. The audit
+                entries of the decision then carry its trace ID, so that the
+                decision appears in your distributed trace.
 
         Returns:
             Dict with ``allowed`` (bool), ``action``, ``reason``,
@@ -424,7 +434,7 @@ class LumoAuthAgent:
         self.ensure_authenticated()
 
         try:
-            result = self._client.agents.ask(action, context)
+            result = self._client.agents.ask(action, context, traceparent=traceparent)
         except LumoAuthApiError as exc:
             _reraise_with_prefix(exc, "Ask API failed")
 
@@ -436,9 +446,15 @@ class LumoAuthAgent:
         )
         return result
 
-    def is_allowed(self, action: str, context: dict[str, Any] | None = None) -> bool:
+    def is_allowed(
+        self,
+        action: str,
+        context: dict[str, Any] | None = None,
+        *,
+        traceparent: str | None = None,
+    ) -> bool:
         """Convenience wrapper: return ``True`` when *action* is allowed."""
-        return self.ask(action, context).get("allowed", False)
+        return self.ask(action, context, traceparent=traceparent).get("allowed", False)
 
     def get_identity(self) -> dict[str, Any]:
         """Return the agent's own identity, capabilities and workspace info.
@@ -618,6 +634,10 @@ class LumoAuthAgent:
 
         Returns:
             An access token string, or *None* when the exchange fails.
+            Returning *None* is deprecated: the failure is logged and a
+            ``FutureWarning`` with the reason is issued, and a later major
+            release will raise instead. Use :meth:`get_mcp_credential`
+            (``.access_token``), which raises the typed error now.
 
         Raises:
             LumoAuthValidationError: *mcp_server_id* is not an absolute
@@ -629,6 +649,14 @@ class LumoAuthAgent:
         except (LumoAuthApiError, LumoAuthConfigError) as exc:
             status = getattr(exc, "status_code", None)
             logger.error("Token exchange failed: HTTP %s — %s", status, exc)
+            reason = f"HTTP {status} {exc.code}: {exc.message}" if status else f"{exc.code}: {exc.message}"
+            warnings.warn(
+                f"get_mcp_token() returned None because the token exchange failed ({reason}). "
+                "Returning None is deprecated and a later major release will raise. "
+                "Use get_mcp_credential(), which raises the error.",
+                FutureWarning,
+                stacklevel=2,
+            )
             return None
 
     def get_mcp_credential(self, mcp_server_id: str) -> McpToken:
@@ -691,9 +719,10 @@ class LumoAuthAgent:
     def dpop_proof(self, method: str, url: str, *, access_token: str | None = None) -> str:
         """A DPoP proof JWT for one request (``htm``/``htu``, plus ``ath`` with a token).
 
-        Use it for endpoints the SDK does not wrap, such as the attestation
-        endpoint (``POST {issuer}/agents/{agent_id}/attest``): pass the full
-        request URL. The remembered ``DPoP-Nonce`` of that origin is included.
+        Use it for endpoints the SDK does not wrap: pass the full request
+        URL. The remembered ``DPoP-Nonce`` of that origin is included. For
+        workload attestation, pass ``agent.dpop`` to
+        :meth:`lumoauth.resources.agents.AgentsResource.attest` instead.
 
         Raises:
             LumoAuthConfigError: The agent was created without ``dpop=``.

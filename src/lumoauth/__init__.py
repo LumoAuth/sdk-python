@@ -88,7 +88,7 @@ from lumoauth.errors import (
     LumoAuthValidationError,
 )
 from lumoauth.jit import JITContext
-from lumoauth.resources.agents import AgentMcpToolDecision
+from lumoauth.resources.agents import AgentMcpToolDecision, WorkloadAttestation
 from lumoauth.resources.mcp import McpToken, McpToolDecision
 from lumoauth.resources.poppy import (
     POPPY_FORWARDED_HEADERS,
@@ -103,7 +103,10 @@ from lumoauth.verify import (
     AccessTokenClaims,
     AccessTokenVerifier,
     DpopRequest,
+    JitTokenClaims,
+    JitTokenVerifier,
     verify_access_token,
+    verify_jit_token,
 )
 
 __all__ = [
@@ -125,6 +128,7 @@ __all__ = [
     "McpToolDecision",
     "McpToken",
     "AgentMcpToolDecision",
+    "WorkloadAttestation",
     # Personal Agent Protocol: Session verification
     "PoppyVerification",
     "PoppySessionInfo",
@@ -141,6 +145,10 @@ __all__ = [
     "AccessTokenVerifier",
     "AccessTokenClaims",
     "DpopRequest",
+    # JIT tokens (the approval of one Just-in-Time request)
+    "verify_jit_token",
+    "JitTokenVerifier",
+    "JitTokenClaims",
     # Errors
     "LumoAuthError",
     "LumoAuthApiError",

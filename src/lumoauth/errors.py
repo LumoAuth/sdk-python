@@ -8,14 +8,14 @@ Mirrors the JS SDK's error hierarchy (same names and codes):
     │   ├── LumoAuthPermissionDeniedError (403, code PERMISSION_DENIED; required_scopes)
     │   ├── LumoAuthNotFoundError         (404, code NOT_FOUND)
     │   └── LumoAuthRateLimitError        (429, code RATE_LIMITED)
+    │       └── LumoAuthBudgetExceededError (429 with body code budget_exceeded, code BUDGET_EXCEEDED)
     ├── LumoAuthValidationError     (bad input / unexpected response shape)
     │   └── LumoAuthTokenError      (an access token or DPoP proof failed local verification; code names why)
     ├── LumoAuthConfigError         (missing or invalid configuration)
     ├── LumoAuthNetworkError        (transport failure: DNS, timeout, TLS, …)
     ├── LumoAuthApprovalDeniedError
     ├── LumoAuthApprovalTimeoutError
-    ├── LumoAuthApprovalNotDeliveredError (code APPROVAL_NOT_DELIVERED; reason)
-    └── LumoAuthBudgetExceededError
+    └── LumoAuthApprovalNotDeliveredError (code APPROVAL_NOT_DELIVERED; reason)
 
 Backwards compatibility: earlier releases of this SDK raised bare
 ``ValueError`` / ``RuntimeError`` (and let ``requests`` transport errors
@@ -249,8 +249,23 @@ class LumoAuthApprovalNotDeliveredError(LumoAuthError):
         self.body = body
 
 
-class LumoAuthBudgetExceededError(LumoAuthError):
-    """The agent's token/spend budget is exhausted."""
+class LumoAuthBudgetExceededError(LumoAuthRateLimitError):
+    """429 with the body code ``budget_exceeded``: the agent's budget is used up.
 
-    def __init__(self, message: str = "Budget exceeded.") -> None:
-        super().__init__(message, "BUDGET_EXCEEDED")
+    LumoAuth answers every metered call of an agent (Ask, token, JIT,
+    attestation) this way when a limit of the agent's budget is reached.
+    ``retry_after`` holds the seconds until the spent window starts again.
+    It is a :class:`LumoAuthRateLimitError`, so code that catches the rate
+    limit error keeps working. ``code`` is the body code (``budget_exceeded``)
+    for an answer of the server, and ``BUDGET_EXCEEDED`` otherwise.
+    """
+
+    def __init__(
+        self,
+        message: str = "Budget exceeded.",
+        code: str = "BUDGET_EXCEEDED",
+        status_code: int = 429,
+        body: Any = None,
+        retry_after: Optional[float] = None,
+    ) -> None:
+        super().__init__(message, code, status_code, body, retry_after)

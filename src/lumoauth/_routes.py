@@ -52,11 +52,16 @@ ROUTES: Dict[str, Tuple[str, str]] = {
     "oauth.token": ("POST", _ORG + "/oauth/token"),
     "oauth.userinfo": ("GET", _ORG + "/oauth/userinfo"),
     "oauth.revoke": ("POST", _ORG + "/oauth/revoke"),
+    # OpenID Connect end-session endpoint (RP-initiated logout). A browser
+    # address: the SDK builds the URL and never sends a request to it.
+    "oauth.logout": ("GET", _ORG + "/oauth/logout"),
     # ── Agent identity ────────────────────────────────────────────────
     "agents.ask": ("POST", _ORG + "/agents/ask"),
     "agents.me": ("GET", _ORG + "/agents/me"),
     "agents.reportUsage": ("POST", _ORG + "/agents/me/usage"),
     "agents.register": ("POST", _ORG + "/agents/register"),
+    # Workload attestation: no credential, the workload's OIDC token is the proof.
+    "agents.attest": ("POST", _ORG + "/agents/{agent_id}/attest"),
     "agents.authorize_mcp_tool": ("POST", _ORG + "/agents/me/mcp/authorize"),
     # ── MCP per-tool checks (the MCP server's own token) ──────────────
     "mcp.authorize_tool": (

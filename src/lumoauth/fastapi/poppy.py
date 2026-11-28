@@ -23,19 +23,23 @@ the protocol headers of each request to LumoAuth, and gives the route the
 
 - A refused request never reaches the route. The personal agent gets the
   response that LumoAuth worded: its status, its headers and its body.
-- An SDK error (LumoAuth cannot be reached, or the application's own 401,
-  403, 404 or 429) never reaches the route either, and it is never relayed.
-  FastAPI answers it with its normal 500.
+- An SDK error (LumoAuth cannot be reached, the protocol is switched off,
+  or the application's own call is refused with 401, 403, 404 or 429)
+  never reaches the route either, and it is never relayed. The personal
+  agent gets ``503`` with ``{"error": "temporarily_unavailable", ...}`` and
+  ``Cache-Control: no-store``, and the cause is logged on the
+  ``lumoauth.fastapi`` logger.
 - The URL is built from ``public_origin`` and the raw path of the request.
   The ``Host`` and ``X-Forwarded-*`` headers are never read.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Mapping, Optional, Union
 from urllib.parse import quote
 
-from lumoauth.errors import LumoAuthConfigError, LumoAuthValidationError
+from lumoauth.errors import LumoAuthConfigError, LumoAuthError, LumoAuthValidationError
 from lumoauth.resources.poppy import (
     PoppyVerification,
     ScopeInput,
@@ -55,9 +59,19 @@ except ImportError as exc:  # pragma: no cover
 __all__ = [
     "LumoAuthPoppy",
     "PoppyRefusal",
+    "PoppyUnavailable",
     "poppy_refusal_handler",
     "poppy_refusal_response",
+    "poppy_unavailable_response",
 ]
+
+logger = logging.getLogger("lumoauth.fastapi")
+
+# The answer when a request cannot be verified at all. The same in every SDK.
+_UNAVAILABLE_BODY = {
+    "error": "temporarily_unavailable",
+    "error_description": "Requests from personal agents cannot be verified right now.",
+}
 
 # Headers that the web server writes itself. A relayed copy would describe
 # another message, so these are not copied from the refusal.
@@ -75,6 +89,28 @@ class PoppyRefusal(Exception):
     def __init__(self, verification: PoppyVerification) -> None:
         super().__init__(f"The request of the personal agent was refused: {verification.error}")
         self.verification = verification
+
+
+class PoppyUnavailable(PoppyRefusal):
+    """The request of a personal agent could not be verified at all.
+
+    The call to LumoAuth failed: LumoAuth cannot be reached, the Personal
+    Agent Protocol is switched off for the organization (``404``), or the
+    application's own credential or scope was refused. This is about your
+    service, not about the personal agent, so nothing of LumoAuth's answer is
+    relayed: the handler answers with :func:`poppy_unavailable_response`.
+    ``cause`` is the SDK error.
+    """
+
+    def __init__(self, cause: LumoAuthError) -> None:
+        Exception.__init__(self, f"The request of the personal agent could not be verified: {cause}")
+        self.verification = None  # type: ignore[assignment]
+        self.cause = cause
+
+
+def poppy_unavailable_response() -> Response:
+    """``503`` with ``temporarily_unavailable`` and ``Cache-Control: no-store``."""
+    return JSONResponse(_UNAVAILABLE_BODY, status_code=503, headers={"Cache-Control": "no-store"})
 
 
 def poppy_refusal_response(verification: PoppyVerification) -> Response:
@@ -108,7 +144,13 @@ def poppy_refusal_response(verification: PoppyVerification) -> Response:
 
 
 async def poppy_refusal_handler(request: Request, exc: Exception) -> Response:
-    """Exception handler for :class:`PoppyRefusal`: relays the refusal unchanged."""
+    """Exception handler for :class:`PoppyRefusal`: relays the refusal unchanged.
+
+    For :class:`PoppyUnavailable` (a subclass) it answers with
+    :func:`poppy_unavailable_response`.
+    """
+    if isinstance(exc, PoppyUnavailable):
+        return poppy_unavailable_response()
     return poppy_refusal_response(exc.verification)  # type: ignore[attr-defined]
 
 
@@ -213,7 +255,8 @@ class LumoAuthPoppy:
         The dependency returns the :class:`~lumoauth.PoppyVerification` of a
         verified request and also stores it as ``request.state.poppy``.
         A refused request raises :class:`PoppyRefusal`, which the handler
-        of :meth:`install` answers. Use one such dependency per route: a
+        of :meth:`install` answers. A request that cannot be verified at all
+        raises :class:`PoppyUnavailable`, answered with ``503``. Use one such dependency per route: a
         Session JWT is good for one verification.
 
         Args:
@@ -242,12 +285,19 @@ class LumoAuthPoppy:
 
         def _dep(request: Request) -> PoppyVerification:
             _require_refusal_handler(request)
-            verification = self.verify(
-                request,
-                required_scope=required_scope,
-                resource=resource,
-                allow_replay=allow_replay,
-            )
+            try:
+                verification = self.verify(
+                    request,
+                    required_scope=required_scope,
+                    resource=resource,
+                    allow_replay=allow_replay,
+                )
+            except LumoAuthError as exc:
+                logger.warning(
+                    "lumoauth.fastapi: a request of a personal agent could not be verified "
+                    "(%s): %s", type(exc).__name__, exc,
+                )
+                raise PoppyUnavailable(exc) from exc
             if not verification.active:
                 raise PoppyRefusal(verification)
             request.state.poppy = verification

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 from urllib.parse import urlencode
@@ -36,7 +37,7 @@ REFRESH_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:refresh_token"
 
 
 class AuthResource:
-    """OAuth 2.1 endpoints (org-scoped): authorize, token, userinfo, revoke."""
+    """OAuth 2.1 endpoints (org-scoped): authorize, token, userinfo, revoke, end session."""
 
     def __init__(self, http: HttpClient) -> None:
         self._http = http
@@ -77,6 +78,36 @@ class AuthResource:
         if extra:
             params.update(extra)
         return f"{self._http.base_url}{path}?{urlencode(params)}"
+
+    def end_session_url(
+        self,
+        *,
+        id_token_hint: Optional[str] = None,
+        post_logout_redirect_uri: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> str:
+        """Build the OpenID Connect end-session URL (RP-initiated logout).
+
+        Send the browser to this URL to end the user's LumoAuth session, after
+        you clear your own session. Pass the last ID token that the user got
+        as ``id_token_hint`` (an expired one is fine): without it LumoAuth
+        asks the user to confirm and ignores ``post_logout_redirect_uri``.
+        ``post_logout_redirect_uri`` must be an absolute URL that is
+        registered as a post-logout redirect URI of the application.
+        LumoAuth adds ``state`` to that URL when it redirects back.
+
+        This method sends no request.
+        """
+        _, path = self._http._fill_route("oauth.logout", None)
+        params: Dict[str, str] = {}
+        if id_token_hint:
+            params["id_token_hint"] = id_token_hint
+        if post_logout_redirect_uri:
+            params["post_logout_redirect_uri"] = post_logout_redirect_uri
+        if state:
+            params["state"] = state
+        url = f"{self._http.base_url}{path}"
+        return f"{url}?{urlencode(params)}" if params else url
 
     # ── Token endpoint flows (form-encoded) ───────────────────────────
 
@@ -136,6 +167,7 @@ class AuthResource:
         dpop: Optional["DpopProofSigner"] = None,
         *,
         client_assertion: Optional[str] = None,
+        resource: Optional[str] = None,
     ) -> Dict[str, Any]:
         """OAuth 2.0 client-credentials grant (machine-to-machine).
 
@@ -143,6 +175,13 @@ class AuthResource:
         (``private_key_jwt``, RFC 7523: a JWT from
         :meth:`lumoauth.ClientAssertionSigner.create`), never both: the server
         accepts one method per request.
+
+        ``resource`` (RFC 8707) is the absolute URL of the API that the token
+        is for, such as ``"https://api.example.com"``. It becomes the token's
+        ``aud``. When the application lists audience URIs, the address must
+        be one of them or start with one (otherwise ``invalid_target``).
+        Without it the token's ``aud`` is the client ID. One value: LumoAuth
+        keeps only the last of repeated ``resource`` parameters.
 
         ``dpop`` (a :class:`~lumoauth.dpop.DpopProofSigner`) sends a DPoP
         proof, so the token is sender-constrained and ``token_type`` is
@@ -166,6 +205,8 @@ class AuthResource:
             data["client_secret"] = str(client_secret)
         if scopes:
             data["scope"] = " ".join(scopes)
+        if resource:
+            data["resource"] = resource
         return self._token_request(data, dpop=dpop)
 
     def token_exchange(
@@ -179,8 +220,22 @@ class AuthResource:
         actor_token_type: str = ACCESS_TOKEN_TYPE,
         resource: Optional[str] = None,
         dpop: Optional["DpopProofSigner"] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        client_assertion: Optional[str] = None,
+        client_auth_method: str = "client_secret_basic",
     ) -> Dict[str, Any]:
         """RFC 8693 token exchange (delegation, MCP audience scoping).
+
+        Client authentication: an agent that sends its own token as
+        ``actor_token`` needs none. A confidential application that exchanges
+        a token (the application's token exchange) authenticates as at the
+        token endpoint: pass ``client_id`` with ``client_secret`` (sent as
+        HTTP Basic by default; ``client_auth_method="client_secret_post"``
+        sends it in the form body), or with ``client_assertion``
+        (``private_key_jwt``, RFC 7523: a JWT from
+        :meth:`lumoauth.ClientAssertionSigner.create`). Pass one of the two,
+        never both.
 
         ``subject_token_type`` / ``actor_token_type`` declare what kind of token
         is being exchanged (``ACCESS_TOKEN_TYPE``, ``JWT_TOKEN_TYPE``,
@@ -209,7 +264,14 @@ class AuthResource:
             data["resource"] = resource
         if scopes:
             data["scope"] = " ".join(scopes)
-        return self._token_request(data, dpop=dpop)
+        headers = _client_authentication(
+            data,
+            client_id=client_id,
+            client_secret=client_secret,
+            client_assertion=client_assertion,
+            method=client_auth_method,
+        )
+        return self._token_request(data, dpop=dpop, headers=headers)
 
     def revoke(
         self,
@@ -244,10 +306,63 @@ class AuthResource:
     # ── Internal ──────────────────────────────────────────────────────
 
     def _token_request(
-        self, data: Dict[str, str], *, dpop: Optional["DpopProofSigner"] = None
+        self,
+        data: Dict[str, str],
+        *,
+        dpop: Optional["DpopProofSigner"] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Any]:
-        # Token endpoints authenticate via the form body — never inject the
-        # client's default credentials. A DPoP signer adds the proof header
-        # (htu = the token endpoint) and the HTTP layer retries once on
-        # use_dpop_nonce.
-        return self._http.call("oauth.token", data=data, auth=False, dpop=dpop)
+        # Token endpoints authenticate via the form body or HTTP Basic — never
+        # inject the client's default credentials. A DPoP signer adds the
+        # proof header (htu = the token endpoint) and the HTTP layer retries
+        # once on use_dpop_nonce.
+        return self._http.call("oauth.token", data=data, auth=False, dpop=dpop, headers=headers)
+
+
+_CLIENT_AUTH_METHODS = ("client_secret_basic", "client_secret_post")
+
+
+def _client_authentication(
+    data: Dict[str, str],
+    *,
+    client_id: Optional[str],
+    client_secret: Optional[str],
+    client_assertion: Optional[str],
+    method: str,
+) -> Optional[Dict[str, str]]:
+    """Add client authentication to a token request; return the headers it needs.
+
+    No ``client_id``: nothing is added (the agent case, where the actor token
+    authenticates). ``client_id`` alone is sent in the form (a public client).
+    """
+    if client_secret and client_assertion:
+        raise LumoAuthValidationError(
+            "pass client_secret or client_assertion, not both: the server accepts one method per request"
+        )
+    if (client_secret or client_assertion) and not client_id:
+        raise LumoAuthValidationError("client_id is required with client_secret or client_assertion")
+    if not client_id:
+        return None
+    if client_assertion:
+        # Lazy import keeps `import lumoauth` free of the cryptography extra.
+        from lumoauth.client_assertion import CLIENT_ASSERTION_TYPE
+
+        data["client_id"] = client_id
+        data["client_assertion_type"] = CLIENT_ASSERTION_TYPE
+        data["client_assertion"] = client_assertion
+        return None
+    if not client_secret:
+        data["client_id"] = client_id
+        return None
+    if method not in _CLIENT_AUTH_METHODS:
+        raise LumoAuthValidationError(
+            f"client_auth_method must be one of {', '.join(_CLIENT_AUTH_METHODS)}"
+        )
+    if method == "client_secret_post":
+        data["client_id"] = client_id
+        data["client_secret"] = client_secret
+        return None
+    # LumoAuth reads the Basic credentials as they are (client IDs and secrets
+    # are URL-safe), so they are not form-encoded first.
+    pair = f"{client_id}:{client_secret}".encode("utf-8")
+    return {"Authorization": "Basic " + base64.b64encode(pair).decode("ascii")}

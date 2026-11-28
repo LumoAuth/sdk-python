@@ -163,6 +163,29 @@ def test_is_allowed_shorthand(agent, fake_session):
     assert agent.is_allowed("document:write") is False
 
 
+TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+
+def test_ask_sends_the_traceparent(agent, fake_session):
+    authenticated(agent, fake_session)
+    fake_session.queue(FakeResponse(200, {"allowed": True}), FakeResponse(200, {"allowed": True}))
+
+    agent.ask("document:read", traceparent=TRACEPARENT)
+    headers = fake_session.last[2]["headers"]
+    assert headers["traceparent"] == TRACEPARENT
+    assert headers["Authorization"] == "Bearer at-1"  # the credential is still added
+
+    assert agent.is_allowed("document:read", {"id": "doc_99"}, traceparent=TRACEPARENT) is True
+    assert fake_session.last[2]["headers"]["traceparent"] == TRACEPARENT
+
+
+def test_ask_without_a_traceparent_sends_none(agent, fake_session):
+    authenticated(agent, fake_session)
+    fake_session.queue(FakeResponse(200, {"allowed": True}))
+    agent.ask("document:read")
+    assert "traceparent" not in fake_session.last[2]["headers"]
+
+
 def test_get_identity_calls_agents_me(agent, fake_session):
     authenticated(agent, fake_session)
     payload = {"identity": {"id": "agt_1"}, "capabilities": [], "workspace": {}}
@@ -264,7 +287,16 @@ def test_get_mcp_token_posts_rfc8693_exchange(agent, fake_session):
 def test_get_mcp_token_returns_none_on_failure(agent, fake_session):
     authenticated(agent, fake_session)
     fake_session.queue(FakeResponse(403, {"error": "forbidden"}))
-    assert agent.get_mcp_token("https://mcp.example.com/x") is None
+    with pytest.warns(FutureWarning, match=r"HTTP 403 forbidden.*get_mcp_credential"):
+        assert agent.get_mcp_token("https://mcp.example.com/x") is None
+
+
+def test_get_mcp_credential_raises_the_same_failure(agent, fake_session):
+    authenticated(agent, fake_session)
+    fake_session.queue(FakeResponse(400, {"error": "invalid_target", "error_description": "Unknown resource"}))
+    with pytest.raises(LumoAuthApiError) as caught:
+        agent.get_mcp_credential("https://mcp.example.com/x")
+    assert (caught.value.status_code, caught.value.code) == (400, "invalid_target")
 
 
 def test_get_mcp_token_rejects_a_urn_server_id(agent, fake_session):
@@ -355,6 +387,163 @@ def test_consent_url_defaults_to_documents_read(agent):
     from lumoauth import DelegationChain
 
     chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
-    query = parse_qs(urlparse(chain.get_consent_url("session_1")).query)
+    # Without the application's client ID the old URL is kept, with a warning: it cannot work.
+    with pytest.warns(FutureWarning, match="app_client_id"):
+        query = parse_qs(urlparse(chain.get_consent_url("session_1")).query)
     assert query["scope"] == ["documents:read"]
     assert query["prompt"] == ["consent"]
+    assert query["client_id"] == [agent.client_id]
+
+
+# ── delegation depth ──────────────────────────────────────────────────
+
+
+def test_delegation_chain_holds_five_actors():
+    from lumoauth import delegation
+
+    assert delegation.MAX_DELEGATION_DEPTH == 5
+
+
+def test_too_deep_chain_is_recognised(agent, fake_session):
+    from lumoauth import DelegationChain
+
+    authenticated(agent, fake_session)
+    chain = DelegationChain(agent, redirect_uri="https://agent.example.com/callback")
+    chain.set_user_token("s1", "user-at")
+    too_deep = "Delegation chain too deep: act nesting depth 6 exceeds the maximum of 5"
+    fake_session.queue(
+        FakeResponse(200, {"access_token": "delegated", "token_type": "Bearer", "expires_in": 600}),
+        FakeResponse(400, {"error": "invalid_request", "error_description": too_deep}),
+    )
+    with pytest.raises(LumoAuthApiError) as caught:
+        chain.delegate_to_sub_agent("s1", "sub-agent-at")
+    err = caught.value
+    assert (err.status_code, err.code) == (400, "invalid_request")
+    assert err.message == f"Delegation chain too deep (max depth: 5): {too_deep}"
+
+
+# ── delegation consent as the application (SRV-47) ──────────────────
+
+
+APP = "client_app123"
+
+
+def _app_chain(agent, secret="app-secret"):
+    from lumoauth import DelegationChain
+
+    return DelegationChain(
+        agent, redirect_uri="https://app.example.com/callback", app_client_id=APP, app_client_secret=secret
+    )
+
+
+def test_consent_url_names_the_application_with_pkce(agent):
+    import base64
+    import hashlib
+    from urllib.parse import parse_qs, urlparse
+
+    chain = _app_chain(agent)
+    url = chain.get_consent_url("s1", scopes=["documents:read"], offline_access=True)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    assert parsed.path == f"/orgs/{ORG}/api/v1/oauth/authorize"
+    assert query["client_id"] == [APP]
+    assert query["redirect_uri"] == ["https://app.example.com/callback"]
+    assert query["scope"] == ["openid documents:read offline_access"]
+    assert query["code_challenge_method"] == ["S256"]
+    assert "prompt" not in query and "access_type" not in query
+    verifier, state = chain._pending_consents["s1"]
+    assert query["state"] == [state] and len(state) >= 24
+    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    assert query["code_challenge"] == [expected]
+    # No refresh token asked for unless offline_access.
+    plain = parse_qs(urlparse(chain.get_consent_url("s2")).query)
+    assert plain["scope"] == ["openid documents:read"]
+
+
+def test_consent_code_is_redeemed_by_the_application(agent, fake_session):
+    from urllib.parse import parse_qs, urlparse
+
+    chain = _app_chain(agent)
+    state = parse_qs(urlparse(chain.get_consent_url("s1", offline_access=True)).query)["state"][0]
+    verifier = chain._pending_consents["s1"][0]
+    fake_session.queue(FakeResponse(200, {"access_token": "user-at", "refresh_token": "user-rt", "expires_in": 3600, "scope": "openid documents:read"}))
+    assert chain.handle_consent_callback("s1", "the-code", state=state) is True
+    method, url, kw = fake_session.last
+    assert (method, url) == ("POST", f"{BASE}/orgs/{ORG}/api/v1/oauth/token")
+    assert kw["data"] == {
+        "grant_type": "authorization_code",
+        "code": "the-code",
+        "redirect_uri": "https://app.example.com/callback",
+        "client_id": APP,
+        "client_secret": "app-secret",
+        "code_verifier": verifier,
+    }
+    # The agent's credentials play no part.
+    assert agent.client_secret not in str(kw)
+
+
+def test_consent_callback_refuses_a_wrong_state_or_an_unknown_session(agent, fake_session):
+    chain = _app_chain(agent)
+    chain.get_consent_url("s1")
+    assert chain.handle_consent_callback("s1", "code", state="forged") is False
+    assert chain.handle_consent_callback("never-started", "code") is False
+    assert fake_session.calls == []
+
+
+def test_a_public_application_redeems_without_a_secret(agent, fake_session):
+    chain = _app_chain(agent, secret=None)
+    chain.get_consent_url("s1")
+    fake_session.queue(FakeResponse(200, {"access_token": "user-at"}))
+    assert chain.handle_consent_callback("s1", "code") is True
+    assert "client_secret" not in fake_session.last[2]["data"]
+
+
+def test_revoke_revokes_the_refresh_token_as_the_application(agent, fake_session):
+    chain = _app_chain(agent)
+    chain.get_consent_url("s1", offline_access=True)
+    fake_session.queue(FakeResponse(200, {"access_token": "user-at", "refresh_token": "user-rt"}))
+    chain.handle_consent_callback("s1", "code")
+    fake_session.queue(FakeResponse(200, {}))
+    assert chain.revoke("s1") is True
+    method, url, kw = fake_session.last
+    assert (method, url) == ("POST", f"{BASE}/orgs/{ORG}/api/v1/oauth/revoke")
+    assert kw["data"] == {"token": "user-rt", "token_type_hint": "refresh_token", "client_id": APP, "client_secret": "app-secret"}
+    assert chain.active_sessions == []
+
+
+def test_revoke_without_the_application_only_forgets_local_state(agent, fake_session, caplog):
+    import logging
+
+    from lumoauth import DelegationChain
+
+    chain = DelegationChain(agent)
+    chain.set_user_token("s1", "user-at")
+    with caplog.at_level(logging.WARNING, logger="lumoauth.delegation"):
+        assert chain.revoke("s1") is False
+    assert fake_session.calls == []  # the agent's credentials never revoke the application's token
+    assert any("only forgotten locally" in r.getMessage() for r in caplog.records)
+    assert chain.active_sessions == []
+
+
+def test_a_failed_revocation_returns_false(agent, fake_session):
+    chain = _app_chain(agent)
+    chain.get_consent_url("s1", offline_access=True)
+    fake_session.queue(FakeResponse(200, {"access_token": "user-at", "refresh_token": "user-rt"}))
+    chain.handle_consent_callback("s1", "code")
+    fake_session.queue(FakeResponse(400, {"error": "invalid_client"}))
+    assert chain.revoke("s1") is False
+
+
+def test_the_application_refreshes_the_persons_token(agent, fake_session):
+    authenticated(agent, fake_session)
+    chain = _app_chain(agent)
+    chain.get_consent_url("s1", offline_access=True)
+    fake_session.queue(FakeResponse(200, {"access_token": "user-at", "refresh_token": "user-rt", "expires_in": -1}))
+    chain.handle_consent_callback("s1", "code")
+    fake_session.queue(
+        FakeResponse(200, {"access_token": "user-at-2", "refresh_token": "user-rt-2", "expires_in": 3600}),
+        FakeResponse(200, {"access_token": "delegated", "expires_in": 600}),
+    )
+    assert chain.exchange("s1") == "delegated"
+    refresh = [kw["data"] for _, url, kw in fake_session.calls if kw.get("data", {}).get("grant_type") == "refresh_token"]
+    assert refresh and refresh[-1]["client_id"] == APP and refresh[-1]["client_secret"] == "app-secret"

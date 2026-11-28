@@ -31,7 +31,22 @@ The host application MUST mount Starlette's ``SessionMiddleware`` (or any
 compatible session backend that exposes ``request.session`` as a dict-like
 object). The PKCE verifier and authorization ``state`` are stashed on the
 session under ``__lumoauth.flow`` so they survive the redirect to LumoAuth
-and back without ever appearing in URLs or cookies.
+and back without ever appearing in URLs. Starlette's ``SessionMiddleware``
+keeps the session in a signed cookie that is not encrypted, so the tokens
+in it can be read by anyone who gets the cookie, and a browser keeps no
+cookie larger than 4096 bytes.
+
+``/logout`` clears the local session and ends the LumoAuth session through
+the end-session endpoint (pass ``end_session_on_logout=False`` to clear only
+the local session). To call an API with the user's access token, refreshed
+when it expires, create the configuration yourself::
+
+    lumo = LumoAuthFastAPI(base_url=..., organization=..., client_id=..., client_secret=...)
+    app.include_router(lumo.router(), prefix="/auth")
+
+    @app.get("/api/documents")
+    def documents(token: str = Depends(lumo.access_token)):
+        ...
 
 Resource servers (an MCP server, an API) protect routes with
 :func:`require_access_token`, which verifies the incoming LumoAuth access
@@ -75,9 +90,11 @@ from .integration import (
 from .poppy import (
     LumoAuthPoppy,
     PoppyRefusal,
+    PoppyUnavailable,
     PoppyVerification,
     poppy_refusal_handler,
     poppy_refusal_response,
+    poppy_unavailable_response,
 )
 from .resource import AccessTokenClaims, parse_authorization, require_access_token
 
@@ -92,7 +109,9 @@ __all__ = [
     "AccessTokenClaims",
     "LumoAuthPoppy",
     "PoppyRefusal",
+    "PoppyUnavailable",
     "PoppyVerification",
     "poppy_refusal_handler",
     "poppy_refusal_response",
+    "poppy_unavailable_response",
 ]

@@ -24,10 +24,12 @@ Needs ``cryptography``: ``pip install "lumoauth[verify]"``.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple
+from urllib.parse import unquote
 
 from lumoauth._http import HttpClient
 from lumoauth._routes import normalize_custom_domain, org_api_base
@@ -53,9 +55,13 @@ __all__ = [
     "AccessTokenVerifier",
     "DpopRequest",
     "InMemoryReplayCache",
+    "JitTokenClaims",
+    "JitTokenVerifier",
     "JwksCache",
     "ReplayCache",
+    "org_id_from_issuer",
     "verify_access_token",
+    "verify_jit_token",
 ]
 
 _AT_JWT_TYPES = ("at+jwt", "application/at+jwt")
@@ -772,3 +778,327 @@ def verify_access_token(
                 _verifiers[key] = verifier
         verifier.clock_skew = float(clock_skew)
     return verifier.verify(token, dpop=dpop, now=now)
+
+
+# ── JIT tokens ───────────────────────────────────────────────────────
+#
+# A JIT token is the approval of one Just-in-Time request
+# (POST /jit/request/{id}/token). It is not an access token: its header typ
+# is JWT, its aud is the organization slug, and the approval is in
+# permissions.authorization_details. The rules are the same as in
+# lumoauth-fastmcp and @lumoauth/mcp (X-LumoAuth-Jit-Token):
+#
+#  1. A compact JWS whose header and payload are JSON objects.
+#  2. Header typ is JWT (any case); at+jwt, another value or none is refused.
+#  3. Header alg is RS256/384/512, PS256/384/512 or ES256/384/512; kid is set.
+#  4. The key with that kid comes from the organization's JWKS; its use is sig
+#     or absent, its kty (and crv) fit the alg, its alg (when set) is the
+#     header's; the signature verifies.
+#  5. iss is the organization issuer (a trailing / ignored on both sides).
+#  6. aud is the organization slug, or a list that contains it.
+#  7. jit is the JSON boolean true.
+#  8. exp is a number and now - skew < exp; nbf and iat, when present, are
+#     numbers and not later than now + skew.
+#  9. sub is a non-empty string; permissions is an object with a non-empty
+#     string agent_id and authorization_details holding at least one object
+#     with a string type. Those objects are the approval.
+# 10. With a caller (the verified access token of the same request): sub is
+#     the caller's sub, and "agent_" + permissions.agent_id is the caller's
+#     agent (act.sub of a delegated token, else its sub); permissions.act.sub,
+#     when present, is that agent too.
+#
+# Not checked locally: revocation before exp. Introspect the token for that
+# (docs: agents/jit, "Validate a JIT token in your API").
+
+_JIT_ALGS: Dict[str, Tuple[str, Optional[str]]] = {
+    "RS256": ("RSA", None),
+    "RS384": ("RSA", None),
+    "RS512": ("RSA", None),
+    "PS256": ("RSA", None),
+    "PS384": ("RSA", None),
+    "PS512": ("RSA", None),
+    "ES256": ("EC", "P-256"),
+    "ES384": ("EC", "P-384"),
+    "ES512": ("EC", "P-521"),
+}
+_ISSUER_SLUG = re.compile(r"/orgs/([^/]+)/api/v1/?$")
+
+
+def _jit_entry_covers(required: Mapping[str, Any], granted: Mapping[str, Any]) -> bool:
+    """One approved entry covers one required entry (RFC 9396 matching)."""
+    req_type = required.get("type")
+    if not isinstance(req_type, str) or granted.get("type") not in (req_type, "*"):
+        return False
+    for member in ("actions", "locations"):
+        wanted = required.get(member)
+        if isinstance(wanted, list) and wanted:
+            have = granted.get(member)
+            if not isinstance(have, list):
+                return False
+            have_set = {str(v) for v in have}
+            if "*" not in have_set and not all(str(v) in have_set for v in wanted):
+                return False
+    req_id = required.get("identifier")
+    if isinstance(req_id, str) and req_id and granted.get("identifier") not in (req_id, "*"):
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class JitTokenClaims:
+    """A verified LumoAuth JIT token (the approval of one JIT request)."""
+
+    #: The approved RFC 9396 entries (``permissions.authorization_details``).
+    authorization_details: Tuple[Dict[str, Any], ...]
+    #: ``sub``: the user, or ``agent_agt_…`` for an agent that acts on its own.
+    subject: str
+    #: The agent that the approval was issued to (``agt_…``).
+    agent_id: str
+    exp: int
+    jti: Optional[str] = None
+    task_id: Optional[str] = None
+    request_id: Optional[str] = None
+    claims: Dict[str, Any] = field(default_factory=dict)
+
+    def covers(
+        self,
+        type: str,
+        *,
+        actions: Optional[List[str]] = None,
+        locations: Optional[List[str]] = None,
+        identifier: Optional[str] = None,
+    ) -> bool:
+        """Whether the approval allows this action.
+
+        An approved entry covers the request when its ``type`` is the same
+        (or ``*``), its ``actions`` and ``locations`` hold every requested
+        value (or ``*``), and its ``identifier`` is the same (or ``*``).
+        """
+        required: Dict[str, Any] = {"type": type}
+        if actions:
+            required["actions"] = list(actions)
+        if locations:
+            required["locations"] = list(locations)
+        if identifier:
+            required["identifier"] = identifier
+        return any(_jit_entry_covers(required, entry) for entry in self.authorization_details)
+
+
+def org_id_from_issuer(issuer: str) -> Optional[str]:
+    """The organization slug of an issuer of the form ``…/orgs/{slug}/api/v1``."""
+    match = _ISSUER_SLUG.search(issuer or "")
+    return unquote(match.group(1)) if match else None
+
+
+class JitTokenVerifier:
+    """Verifies LumoAuth JIT tokens of one organization.
+
+    Args:
+        issuer: ``https://app.lumoauth.dev/orgs/{org}/api/v1``. Leave it out
+            with ``custom_domain``.
+        org_id: The organization slug, the ``aud`` of its JIT tokens. Read
+            from *issuer* when it is left out; required with ``custom_domain``.
+        custom_domain: The organization's own domain (``"auth.acme.com"``).
+        jwks: Static JWKS instead of discovery.
+        fetch: Custom ``fetch(url) -> dict`` for discovery and the JWKS.
+        clock_skew: Leeway in seconds (default 60).
+
+    Raises:
+        LumoAuthConfigError: The issuer is missing or malformed, or the
+            organization slug is unknown.
+    """
+
+    def __init__(
+        self,
+        issuer: Optional[str] = None,
+        *,
+        org_id: Optional[str] = None,
+        custom_domain: Optional[str] = None,
+        jwks: Optional[Mapping[str, Any]] = None,
+        fetch: Optional[Fetch] = None,
+        clock_skew: float = 60,
+        verify_tls: bool = True,
+    ) -> None:
+        self.issuer, metadata_base = resolve_issuer(issuer, custom_domain)
+        slug = org_id or org_id_from_issuer(self.issuer)
+        if not slug:
+            raise LumoAuthConfigError(
+                "org_id is required to verify JIT tokens: their aud is the organization slug. "
+                "Pass org_id (LUMOAUTH_ORG_ID)."
+            )
+        self.org_id: str = slug
+        self.clock_skew = float(clock_skew)
+        self.jwks = JwksCache(
+            self.issuer, jwks=jwks, fetch=fetch, verify_tls=verify_tls, metadata_base=metadata_base
+        )
+
+    def verify(
+        self,
+        token: str,
+        *,
+        caller: Optional[AccessTokenClaims] = None,
+        now: Optional[float] = None,
+    ) -> JitTokenClaims:
+        """Verify *token*; raise :class:`LumoAuthTokenError` when it is not acceptable.
+
+        Pass *caller* (the verified access token of the same request) to
+        check that the approval belongs to the caller. ``code`` of a refusal
+        is ``JIT_TOKEN_INVALID``, ``JIT_TOKEN_NOT_FOR_CALLER``, or the code of
+        the key lookup (``TOKEN_KEYS_UNAVAILABLE``).
+        """
+
+        def refuse(message: str, code: str = "JIT_TOKEN_INVALID") -> LumoAuthTokenError:
+            return LumoAuthTokenError(message, code)
+
+        if not isinstance(token, str):
+            raise refuse("the JIT token is not a JWT")
+        try:
+            header, payload, signing_input, signature = split_jws(token)
+        except LumoAuthValidationError as exc:
+            raise refuse("the JIT token is not a JWT") from exc
+
+        typ = header.get("typ")
+        if not isinstance(typ, str) or typ.lower() != "jwt":
+            raise refuse(f"the JIT token's typ must be JWT, got {typ!r}")
+        alg = header.get("alg")
+        spec = _JIT_ALGS.get(alg) if isinstance(alg, str) else None
+        if spec is None:
+            raise refuse(f"the JIT token's alg {alg!r} is not allowed")
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not kid:
+            raise refuse("the JIT token has no kid")
+
+        iss = payload.get("iss")
+        if not isinstance(iss, str) or iss.rstrip("/") != self.issuer:
+            raise refuse("the JIT token comes from another issuer")
+
+        try:
+            key = self.jwks.key_for(kid, now=now)
+        except LumoAuthTokenError as exc:
+            if exc.code == "TOKEN_UNKNOWN_KEY":
+                raise refuse(f"no signing key with kid {kid!r} in the organization's keys") from exc
+            raise refuse(f"cannot read the organization's signing keys: {exc.message}", exc.code) from exc
+        if key.get("use") not in (None, "sig"):
+            raise refuse("the signing key is not a signature key")
+        kty, crv = spec
+        if key.get("kty") != kty or (crv is not None and key.get("crv") != crv):
+            raise refuse(f"the signing key does not fit alg {alg}")
+        if key.get("alg") is not None and key.get("alg") != alg:
+            raise refuse(f"the signing key is for alg {key.get('alg')}")
+        try:
+            valid = verify_signature(public_key_from_jwk(key), alg, signing_input, signature)
+        except LumoAuthValidationError as exc:
+            raise refuse("the signing key cannot be read") from exc
+        if not valid:
+            raise refuse("the JIT token signature is invalid")
+
+        aud = payload.get("aud")
+        audiences = (aud,) if isinstance(aud, str) else tuple(aud) if isinstance(aud, list) else ()
+        if self.org_id not in audiences:
+            raise refuse("the JIT token is for another organization")
+        if payload.get("jit") is not True:
+            raise refuse("the token is not a JIT token (jit is not true)")
+
+        current = time.time() if now is None else now
+        exp = payload.get("exp")
+        if not _is_number(exp) or current - self.clock_skew >= exp:
+            raise refuse("the JIT token has expired")
+        for name in ("nbf", "iat"):
+            value = payload.get(name)
+            if value is not None and (not _is_number(value) or value > current + self.clock_skew):
+                raise refuse(f"the JIT token is not valid yet ({name})")
+
+        sub = payload.get("sub")
+        if not isinstance(sub, str) or not sub:
+            raise refuse("the JIT token has no sub")
+        permissions = payload.get("permissions")
+        if not isinstance(permissions, dict):
+            raise refuse("the JIT token has no permissions")
+        agent_id = permissions.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            raise refuse("the JIT token names no agent")
+        raw_details = permissions.get("authorization_details")
+        details = tuple(
+            dict(item)
+            for item in (raw_details if isinstance(raw_details, list) else [])
+            if isinstance(item, dict) and isinstance(item.get("type"), str)
+        )
+        if not details:
+            raise refuse("the JIT token approves nothing (no authorization_details)")
+
+        if caller is not None:
+            act = caller.act
+            caller_agent = (
+                str(act["sub"])
+                if isinstance(act, Mapping) and isinstance(act.get("sub"), str) and act.get("sub")
+                else caller.sub
+            )
+            bound = permissions.get("act")
+            delegated_agent = bound.get("sub") if isinstance(bound, dict) else None
+            if (
+                sub != caller.sub
+                or f"agent_{agent_id}" != caller_agent
+                or (delegated_agent is not None and delegated_agent != caller_agent)
+            ):
+                raise refuse("the JIT token was issued to another caller", "JIT_TOKEN_NOT_FOR_CALLER")
+
+        jti = payload.get("jti")
+        task_id = permissions.get("task_id")
+        request_id = permissions.get("jit_request_id")
+        return JitTokenClaims(
+            authorization_details=details,
+            subject=sub,
+            agent_id=agent_id,
+            exp=int(exp),
+            jti=jti if isinstance(jti, str) else None,
+            task_id=task_id if isinstance(task_id, str) else None,
+            request_id=request_id if isinstance(request_id, str) else None,
+            claims=dict(payload),
+        )
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_jit_verifiers: Dict[Tuple[str, str], JitTokenVerifier] = {}
+
+
+def verify_jit_token(
+    token: str,
+    *,
+    issuer: Optional[str] = None,
+    org_id: Optional[str] = None,
+    custom_domain: Optional[str] = None,
+    caller: Optional[AccessTokenClaims] = None,
+    jwks: Optional[Mapping[str, Any]] = None,
+    fetch: Optional[Fetch] = None,
+    clock_skew: float = 60,
+    now: Optional[float] = None,
+) -> JitTokenClaims:
+    """Verify a LumoAuth JIT token locally. A shortcut over :class:`JitTokenVerifier`.
+
+    With the default fetcher and no ``jwks``, one verifier (and its JWKS
+    cache) is kept per issuer and organization. The token is not checked
+    for revocation: introspect it for an action with consequences.
+
+    Raises:
+        LumoAuthTokenError: The token is not acceptable; ``code`` says why.
+        LumoAuthConfigError: The issuer or the organization is unknown.
+    """
+    if jwks is not None or fetch is not None:
+        verifier = JitTokenVerifier(
+            issuer, org_id=org_id, custom_domain=custom_domain, jwks=jwks, fetch=fetch, clock_skew=clock_skew
+        )
+    else:
+        resolved, _ = resolve_issuer(issuer, custom_domain)
+        key = (resolved, org_id or org_id_from_issuer(resolved) or "")
+        with _verifiers_lock:
+            verifier = _jit_verifiers.get(key)
+            if verifier is None:
+                verifier = JitTokenVerifier(
+                    issuer, org_id=org_id, custom_domain=custom_domain, clock_skew=clock_skew
+                )
+                _jit_verifiers[key] = verifier
+        verifier.clock_skew = float(clock_skew)
+    return verifier.verify(token, caller=caller, now=now)

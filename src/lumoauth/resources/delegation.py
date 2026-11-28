@@ -19,8 +19,10 @@ logger = logging.getLogger("lumoauth.delegation")
 
 __all__ = ["DelegationResource", "MAX_DELEGATION_DEPTH"]
 
-# Maximum delegation depth enforced by LumoAuth.
-MAX_DELEGATION_DEPTH = 3
+# The most actors that a delegation chain can hold: LumoAuth refuses a token
+# exchange whose `act` chain would be deeper (400 invalid_request,
+# "Delegation chain too deep: ...").
+MAX_DELEGATION_DEPTH = 5
 
 
 class DelegationResource:
@@ -39,18 +41,25 @@ class DelegationResource:
         redirect_uri: str,
         scopes: Optional[List[str]] = None,
         state: Optional[str] = None,
+        code_challenge: Optional[str] = None,
     ) -> str:
-        """Authorization URL where a user grants the agent delegated access.
+        """Authorization URL where a person consents to delegated access.
 
-        Without *scopes* it asks for ``documents:read``.
+        *client_id* is the client ID of an APPLICATION of the organization
+        and *redirect_uri* one of its registered redirect URIs: an agent's ID
+        is refused. Pass a PKCE ``code_challenge`` (S256); a public
+        application needs one. Without *scopes* it asks for
+        ``documents:read``; add ``offline_access`` to *scopes* for a refresh
+        token.
         """
         return self._auth.authorization_url(
             client_id=client_id,
             redirect_uri=redirect_uri,
             scope=" ".join(scopes or ["documents:read"]),
             state=state,
-            prompt="consent",
-            access_type="offline",
+            code_challenge=code_challenge,
+            prompt=None if code_challenge else "consent",
+            access_type=None if code_challenge else "offline",
         )
 
     def exchange_code(
@@ -60,10 +69,12 @@ class DelegationResource:
         *,
         client_id: str,
         client_secret: Optional[str] = None,
+        code_verifier: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Exchange a consent callback code for user tokens."""
+        """Redeem a consent callback code as the application (its client ID and secret)."""
         return self._auth.exchange_code(
-            code, redirect_uri, client_id=client_id, client_secret=client_secret
+            code, redirect_uri, client_id=client_id, client_secret=client_secret,
+            code_verifier=code_verifier,
         )
 
     def refresh_user_token(
